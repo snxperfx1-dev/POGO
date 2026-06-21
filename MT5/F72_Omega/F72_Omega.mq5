@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.5"
+#define OMEGA_VERSION                "1.0.0-phase5.5.2"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -3836,9 +3836,9 @@ private:
       bool confOK = (s.confidence >= minConf);
 
       // Approximate alignment count from supporting.alignment 0..100
-      // (decision engine threshold is in TFs out of 6)
+      // (decision engine threshold is in TFs out of 6) — INFO only,
+      // never blocks an entry. The curve tree owner is the actual gate.
       int alignedN = (int)MathRound(s.supporting.alignment / 100.0 * 6.0);
-      bool alignOK = (alignedN >= m_minAlign);
 
       // Title
       EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
@@ -3876,12 +3876,11 @@ private:
                    confStr, confOK ? m_bull : m_bear);
       row++;
 
-      // Alignment row — count out of 6 vs required
-      string alignStr = StringFormat("align            %d/6  >=%d/6  %s",
-                                      alignedN, m_minAlign,
-                                      alignOK ? "OK" : "X");
+      // Alignment row — INFO only (lower TFs rotating against higher
+      // TFs is the curve tree at work, not a problem to filter out).
+      string alignStr = StringFormat("align            %d/6  (info — child rotation OK)", alignedN);
       EnsureLabel(N("HUD_ALIGN"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   alignStr, alignOK ? m_bull : m_bear);
+                   alignStr, m_dim);
       row++;
 
       // Owner curve
@@ -3945,16 +3944,18 @@ private:
       row++;
 
       // GATE line — explicit pass/fail summary so the user can SEE why
-      // the engine is or isn't entering. Names every failing gate inline.
+      // the engine is or isn't entering. The actual gates are: owner
+      // exists + Trinity floors. Alignment is informational, never a gate.
       string gate = "";
+      bool   ownerOK = (curve.tree.ownerIndex >= 0 && oDir != 0);
       if(!s.primed)         gate = "WARMUP — perception not primed yet";
       else
         {
          string blockers = "";
+         if(!ownerOK) blockers += "no owning curve  ";
          if(!lifeOK)  blockers += StringFormat("life %.0f<%.0f  ", s.life,       minLife);
          if(!stabOK)  blockers += StringFormat("stab %.0f<%.0f  ", s.stability,  minStab);
          if(!confOK)  blockers += StringFormat("conf %.0f<%.0f  ", s.confidence, minConf);
-         if(!alignOK) blockers += StringFormat("align %d/6<%d/6  ", alignedN, m_minAlign);
          if(StringLen(blockers) == 0) gate = "GATES OPEN — entry eligible";
          else                          gate = "BLOCKED  " + blockers;
         }
@@ -6463,7 +6464,17 @@ public:
          return r;
         }
 
-      //--- 5. HOLDING / ALIVE: entries and adds
+      //--- 5. HOLDING / ALIVE: entries and adds.
+      //    THEORY CORRECTION (Phase 5.5.2): timeframe alignment is a
+      //    SUPPORTING signal, not a hard gate. Lower TFs rotating against
+      //    higher TFs IS the curve tree at work — children recursing against
+      //    a parent. The actual decision driver is the curve tree owner +
+      //    Trinity. Alignment is already folded into stability upstream
+      //    (Story engine), so requiring it again here was double-counting
+      //    and architecturally wrong.
+      //    `aligned` is kept as INFO only — surfaced in the trade comment
+      //    and HUD so the trader can see the cross-TF context, but never
+      //    blocks an entry.
       bool aligned = (state.supporting.alignment >= (p.enterMinAlign / 6.0) * 100.0);
 
       if(verdict == LIFE_HOLDING)
@@ -6471,21 +6482,20 @@ public:
          if(activeSameDirCount == 0)
            {
             if(state.confidence >= p.enterMinConf
-               && state.stability >= p.enterMinStability
-               && aligned)
+               && state.stability >= p.enterMinStability)
               {
                r.decision      = OMEGA_DEC_ENTER_LONG;
                if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
                r.reason        = REASON_HEALTHY_CONTINUATION;
                r.suggestedRole = POS_ORIGIN;
-               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f align %.0f%% — origin entry",
+               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f align %.0f%% (info) — origin entry",
                                               state.life, state.stability, state.confidence,
                                               state.supporting.alignment);
                return r;
               }
             r.decision = OMEGA_DEC_OBSERVE;
             r.reason   = REASON_NARRATIVE_DIVERGE;
-            r.detail   = "holding but stability/conf/alignment below entry";
+            r.detail   = "holding but stability/conf below entry";
             return r;
            }
          r.decision = OMEGA_DEC_HOLD;
@@ -6498,22 +6508,20 @@ public:
       if(activeSameDirCount == 0)
         {
          if(state.confidence >= p.attackMinConf
-            && state.stability >= p.attackMinStab
-            && aligned)
+            && state.stability >= p.attackMinStab)
            {
             r.decision      = OMEGA_DEC_ENTER_LONG;
             if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
             r.reason        = REASON_HEALTHY_CONTINUATION;
             r.suggestedRole = POS_ORIGIN;
-            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f align %.0f%% — origin entry (strong)",
+            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f align %.0f%% (info) — origin entry (strong)",
                                             state.life, state.stability, state.confidence,
                                             state.supporting.alignment);
             return r;
            }
          //-- alive but conditions for full attack not met → demote to normal entry
          if(state.stability >= p.enterMinStability
-            && state.confidence >= p.enterMinConf
-            && aligned)
+            && state.confidence >= p.enterMinConf)
            {
             r.decision = (ownerDir == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
             r.reason   = REASON_HEALTHY_CONTINUATION;
@@ -6523,7 +6531,7 @@ public:
            }
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = REASON_NARRATIVE_DIVERGE;
-         r.detail   = "alive but stability/conf/alignment below threshold";
+         r.detail   = "alive but stability/conf below threshold";
          return r;
         }
 
