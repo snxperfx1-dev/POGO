@@ -3603,6 +3603,7 @@ private:
    color   m_warn;
    double  m_fuWickFrac;
    int     m_fuLookback;
+   int     m_minAlign;            // 4-of-6 default — used by the gate line
    long    m_lastOwnerId;
    datetime m_lastOwnerTime;
    int     m_posCounter;         // monotonic for position-marker names
@@ -3703,6 +3704,7 @@ public:
       m_warn = (color)0x24BFFB;     // BGR for #FBBF24
       m_fuWickFrac = 0.30;
       m_fuLookback = 5;
+      m_minAlign   = 4;
       m_lastOwnerId = -1;
       m_lastOwnerTime = 0;
       m_posCounter = 0;
@@ -3745,6 +3747,10 @@ public:
         }
       ChartRedraw(0);
      }
+
+   //--- Phase 5.5 — wire the entry-alignment gate from EA inputs so the
+   //    HUD's gate line stays in sync with the decision engine.
+   void SetEntryGates(int minAlign) { m_minAlign = minAlign; }
 
    //--- Per-tick update (called from EA OnTick).
    void Update(const OmegaState &state, OmegaCurve &curve,
@@ -3808,7 +3814,7 @@ private:
                   ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
                   ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
      {
-      int rows = 11;
+      int rows = 13;
       int W = m_hudWidth;
       int H = m_lineHeight * rows + 14;
       int X = m_hudX;
@@ -3819,6 +3825,20 @@ private:
       int row = 0;
       int rx = X + 8;
       int ry = Y + 8;
+
+      // Per-tier conviction floors
+      double minLife = risk.TierMinLife(tier);
+      double minStab = risk.TierMinStab(tier);
+      double minConf = risk.TierMinConf(tier);
+
+      bool lifeOK = (s.life       >= minLife);
+      bool stabOK = (s.stability  >= minStab);
+      bool confOK = (s.confidence >= minConf);
+
+      // Approximate alignment count from supporting.alignment 0..100
+      // (decision engine threshold is in TFs out of 6)
+      int alignedN = (int)MathRound(s.supporting.alignment / 100.0 * 6.0);
+      bool alignOK = (alignedN >= m_minAlign);
 
       // Title
       EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
@@ -3836,18 +3856,32 @@ private:
                    tierLine, tcol);
       row++;
 
-      // Trinity bars
-      string lifeStr = StringFormat("life  %s %5.1f", GaugeBar(s.life), s.life);
-      string stabStr = StringFormat("stab  %s %5.1f", GaugeBar(s.stability), s.stability);
-      string confStr = StringFormat("conf  %s %5.1f", GaugeBar(s.confidence), s.confidence);
+      // Trinity bars — each shows value, gauge, tier floor, pass/fail mark
+      string lifeStr = StringFormat("life  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.life), s.life, minLife,
+                                     lifeOK ? "OK" : "X");
+      string stabStr = StringFormat("stab  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.stability), s.stability, minStab,
+                                     stabOK ? "OK" : "X");
+      string confStr = StringFormat("conf  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.confidence), s.confidence, minConf,
+                                     confOK ? "OK" : "X");
       EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   lifeStr, s.life >= 60 ? m_bull : s.life >= 45 ? m_warn : m_bear);
+                   lifeStr, lifeOK ? m_bull : m_bear);
       row++;
       EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   stabStr, s.stability >= 60 ? m_bull : s.stability >= 45 ? m_warn : m_bear);
+                   stabStr, stabOK ? m_bull : m_bear);
       row++;
       EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   confStr, s.confidence >= 55 ? m_bull : s.confidence >= 40 ? m_warn : m_bear);
+                   confStr, confOK ? m_bull : m_bear);
+      row++;
+
+      // Alignment row — count out of 6 vs required
+      string alignStr = StringFormat("align            %d/6  >=%d/6  %s",
+                                      alignedN, m_minAlign,
+                                      alignOK ? "OK" : "X");
+      EnsureLabel(N("HUD_ALIGN"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   alignStr, alignOK ? m_bull : m_bear);
       row++;
 
       // Owner curve
@@ -3875,10 +3909,11 @@ private:
       row++;
 
       // Supporting (force / regime)
-      string supp = StringFormat("force %5.1f  comp %5.1f  align %5.1f",
+      string supp = StringFormat("force %5.1f  comp %5.1f  regime %s",
                                   s.supporting.forceScore,
                                   s.supporting.compression,
-                                  s.supporting.alignment);
+                                  s.supporting.regime > 0 ? "trend" :
+                                  s.supporting.regime < 0 ? "rotate" : "mixed");
       EnsureLabel(N("HUD_SUPP"), m_hudCorner, rx, ry + row * m_lineHeight,
                    supp, m_dim);
       row++;
@@ -3907,6 +3942,25 @@ private:
                                   s.supporting.pTransfer);
       EnsureLabel(N("HUD_PROB"), m_hudCorner, rx, ry + row * m_lineHeight,
                    prob, m_dim);
+      row++;
+
+      // GATE line — explicit pass/fail summary so the user can SEE why
+      // the engine is or isn't entering. Names every failing gate inline.
+      string gate = "";
+      if(!s.primed)         gate = "WARMUP — perception not primed yet";
+      else
+        {
+         string blockers = "";
+         if(!lifeOK)  blockers += StringFormat("life %.0f<%.0f  ", s.life,       minLife);
+         if(!stabOK)  blockers += StringFormat("stab %.0f<%.0f  ", s.stability,  minStab);
+         if(!confOK)  blockers += StringFormat("conf %.0f<%.0f  ", s.confidence, minConf);
+         if(!alignOK) blockers += StringFormat("align %d/6<%d/6  ", alignedN, m_minAlign);
+         if(StringLen(blockers) == 0) gate = "GATES OPEN — entry eligible";
+         else                          gate = "BLOCKED  " + blockers;
+        }
+      bool gateOpen = (StringFind(gate, "OPEN") == 0);
+      EnsureLabel(N("HUD_GATE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   gate, gateOpen ? m_bull : m_bear);
       row++;
      }
 
@@ -7702,6 +7756,7 @@ int OnInit()
                 InpChartHUD, InpChartMTFMap, InpChartOwnerBox, InpChartFlipZone,
                 InpChartBudgetTgt, InpChartFUMarks, InpChartPositions,
                 0.30, 5);
+   g_chart.SetEntryGates(InpEnterMinAlign);
 
 //--- 10. News calendar (Phase 7, optional).
    g_news.Load();
