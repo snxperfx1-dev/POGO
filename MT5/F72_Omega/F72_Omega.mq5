@@ -6182,60 +6182,913 @@ void f60_substrate_init()
 //--- authoritative substrate tick (run FIRST each bar) ------------
 bool f60_substrate_update()
   {
-   if(!f_updateStructure()) return false;   // physics + f_se 14-phase + Engine 1A authority
-   f_networkUpdate();                       // authentic Invisible Network registry
-   f60_updateObservation();                 // #7 FCE/observation bridge -> ERF
-   f60_updateAttack();                      // #15 Attack Sequence -> TE
+   if(!f_updateStructure()) return false;   // #1 f_phys + #2 f_se + #3 Engine 1A authority
+   g_chartBarCount++;
+   f_updatePivots();
+   f_updateObservation();   // #7  FCE / physics observation -> ERF
+   f_updateERF();           //     EDE / RE / EAE
+   f_updateLiquidity();     //     liquidity heatmap + sweep
+   f_updateWaveIntel();     //     similarity / convexity maturity / wave progress / budget
+   f_updateBelief();        //     6 EMA beliefs
+   f_updateSpawn();         // #5  wave spawn + recursion
+   f_updateLiqg();          // #4  liquidation overlay substates
+   f_updateFRZ();           //     future return zones
+   f_networkUpdate();       // #9  Invisible Network registry
+   f_updateTIE();           // #10 Time Intelligence
+   f_updateCurve();         // #11/#12/#13/#14/#16 curve+tree+compression+chain+campaign
+   f_updateSenseei();       // #17 Senseei inputs
+   f_updateSenzo();         //     cockpit voice
+   f_updateAttack();        // #15 attack sequence -> TE
    return true;
   }
 
 
 
-//==================================================================
-//= MODULE: F60Substrate.Observation  (#7 FCE / Physics Observation)
-//   The bridge physics -> higher intelligence. obs_* scores feed
-//   ERF (residual/unresolved energy). Derived purely from the
-//   already-authentic f_phys chart-wave physics. Namespaced f60_*.
-//==================================================================
-double f60_velocityScore=0, f60_accelerationScore=0, f60_convexityScore=0;
-double f60_obs_Expansion=0, f60_obs_Decay=0, f60_obs_Curvature=0, f60_obs_Absorption=0, f60_obs_Liquidity=0;
 
-void f60_updateObservation()
+//==================================================================
+//= MODULE: F60Substrate.Perception  (authentic F60 chain: ERF / FCE
+//=   observation / liquidity / wave-intel / belief / spawn+recursion /
+//=   liquidation overlay / FRZ / Time Intel / curve object + recursive
+//=   curve tree + compression persistence + chain vitality + lineage +
+//=   campaign ownership / Senseei inputs / Senzo / Attack Sequence.)
+//=   F60-OWNED; OMEGA proxy bodies gutted to consume these. f60_* = renamed colliders.
+//==================================================================
+//==================================================================
+// WAVE CONTEXT STATE (Pine Section 8) — assigned by the chart-wave
+// Spawn Engine (PART B.6). Declared here so the observation/ERF
+// layers (which run first in Pine's source order via prev-bar refs)
+// can read them. Initialised na-equivalent (0 / false).
+//==================================================================
+int    f60_direction = 0;
+double flipTop=0, flipBot=0;
+double point4OriginHigh=0, point4OriginLow=0;
+double cycleHigh=0, cycleLow=0;
+int    entryCycle=0, waveDepth=0, waveGeneration=0;
+bool   isRecursiveWave=false, recursiveComplete=false;
+double inducZoneLow=0, inducZoneHigh=0;
+double convexityMaturity=0.0;       // EMA-smoothed (Section 12)
+double f60_liqHeat=0.0;                 // Section 10
+bool   nearFlipzone=false, closeInside=false, inductionEvidence=false, preConvEvidence=false;
+
+//==================================================================
+// PART B.4 — PHYSICS OBSERVATION LAYER  (Pine Section 9, exact)
+//==================================================================
+double velocityScore=0, accelerationScore=0, f60_convexityScore=0;
+double obs_ExpansionScore=0, obs_DecayScore=0, obs_CurvatureScore=0;
+double obs_AbsorptionScore=0, obs_LiquidityScore=0;
+
+void f_updateObservation()
   {
    double atr = g_atr;
-   f60_velocityScore     = MathMin(MathAbs(g_vel) / MathMax(atr * 0.1, 1e-10) * 50.0, 100.0);
-   f60_accelerationScore = MathMin(MathAbs(g_acc) / MathMax(atr * 0.05, 1e-10) * 50.0, 100.0);
+   velocityScore     = MathMin(MathAbs(g_vel) / MathMax(atr * 0.1, 1e-10) * 50.0, 100.0);
+   accelerationScore = MathMin(MathAbs(g_acc) / MathMax(atr * 0.05, 1e-10) * 50.0, 100.0);
    f60_convexityScore    = MathMin(MathAbs(g_csm) / MathMax(atr * g_convMult, 1e-10) * 25.0, 100.0);
-   f60_obs_Expansion = MathMin((g_eff > g_effThresh ? g_eff * 60.0 : g_eff * 30.0)
-                        + (g_disp > g_dispThresh ? (g_disp / MathMax(g_dispThresh,1e-10) - 1.0) * 20.0 : 0.0)
-                        + ((g_vel > 0 && g_acc > 0) || (g_vel < 0 && g_acc < 0) ? f60_velocityScore * 0.2 : 0.0), 100.0);
-   f60_obs_Decay = MathMin((g_bullMomDecay || g_bearMomDecay ? 40.0 : 0.0)
+   obs_ExpansionScore = MathMin((g_eff > g_effThresh ? g_eff * 60.0 : g_eff * 30.0)
+                        + (g_disp > g_dispThresh ? (g_disp / MathMax(g_dispThresh, 1e-10) - 1.0) * 20.0 : 0.0)
+                        + ((g_vel > 0 && g_acc > 0) || (g_vel < 0 && g_acc < 0) ? velocityScore * 0.2 : 0.0), 100.0);
+   obs_DecayScore     = MathMin((g_bullMomDecay || g_bearMomDecay ? 40.0 : 0.0)
                         + (f60_convexityScore > 30 ? f60_convexityScore * 0.5 : 0.0) + (g_vd70 ? 30.0 : 0.0), 100.0);
-   f60_obs_Curvature = f60_convexityScore;
-   f60_obs_Absorption = MathMin((g_eff < g_effThresh * 0.7 ? (1.0 - g_eff/MathMax(g_effThresh,1e-10)) * 50.0 : 0.0)
+   obs_CurvatureScore = f60_convexityScore;
+   obs_AbsorptionScore = MathMin((g_eff < g_effThresh * 0.7 ? (1.0 - g_eff / MathMax(g_effThresh, 1e-10)) * 50.0 : 0.0)
                         + (g_vd50 ? 30.0 : 0.0) + (g_disp < g_dispThresh * 0.5 ? 20.0 : 0.0), 100.0);
-   f60_obs_Liquidity = MathMin(f60_obs_Decay * 0.4 + f60_obs_Curvature * 0.4
+   obs_LiquidityScore = MathMin(obs_DecayScore * 0.4 + obs_CurvatureScore * 0.4
                         + (g_disp > g_dispThresh * 1.2 && (g_bullMomDecay || g_bearMomDecay) ? 20.0 : 0.0), 100.0);
   }
 
 //==================================================================
-//= MODULE: F60Substrate.AttackSequence  (#15 — feeds TE, not replace)
-//   Entry / stop / T1-T3 read straight from the authentic f_se
-//   engines (chart M5 flip-zone + invalidation + objective; M15/H1
-//   secondary/extended objectives). Namespaced f60_*.
+// PART B.5 — ENERGY RESOLUTION FRAMEWORK (ERF): EDE -> RE -> EAE
+//   (Pine exact). ede_state is derived from the IE1A canonical phase.
 //==================================================================
-double f60_atkEntryPx=0, f60_atkStopPx=0, f60_atkT1Px=0, f60_atkT2Px=0, f60_atkT3Px=0;
-int    f60_atkBias=0;
+int    ede_state=1;
+double ede_expansionEnergy=0, ede_dissipatedEnergy=0, ede_dissipationProgress=0;
+int    re_expectedCycles=1, re_completedCycles=0;
+double re_recursiveCompletionScore=0, re_residualEnergy=0, re_residualEnergyScore=0;
+bool   re_objectiveReached=false, re_fullDissipation=false, re_absorbedAndReturned=false;
+string re_resolutionState="UNRESOLVED";
+double eae_primaryAttractorPrice=0, eae_primaryAttractorScore=0;
+double eae_secondaryAttractorPrice=0, eae_secondaryAttractorScore=0;
+double eae_tertiaryAttractorPrice=0, eae_tertiaryAttractorScore=0;
+string eae_primaryAttractorLabel="No Active Attractor";
+string eae_energyState="Accumulating";
 
-void f60_updateAttack()
+void f_updateERF()
   {
-   f60_atkEntryPx = (g_se5.o.ft != 0 && g_se5.o.fb != 0) ? (g_se5.o.ft + g_se5.o.fb) / 2.0 : 0;
-   f60_atkStopPx  = g_se5.o.inv;
-   f60_atkT1Px    = g_se5.o.tgt;
-   f60_atkT2Px    = g_se15.o.tgt;
-   f60_atkT3Px    = g_se60.o.tgt;
-   f60_atkBias    = (f60_atkEntryPx==0 || f60_atkT1Px==0) ? f60_waveDir : (f60_atkT1Px >= f60_atkEntryPx ? 1 : -1);
+   string ph = ie1a_currentPhase;
+   double atr = g_atr;
+   // --- EDE ---
+   ede_state =
+       ph == "Point 4 Origin"          ? 1 :
+       ph == "Expansion"               ? 1 :
+       ph == "Expansion Pre-Convexity" ? 2 :
+       ph == "Expansion Induction"     ? 3 :
+       ph == "Expansion Liquidity"     ? 4 :
+       ph == "New High"                ? 5 :
+       ph == "New Low"                 ? 5 : 6;
+   ede_expansionEnergy = MathMin(obs_ExpansionScore * 0.50 + (g_bullImpulse || g_bearImpulse ? 30.0 : 0.0) + g_eff * 20.0, 100.0);
+   ede_dissipatedEnergy = MathMin((ede_state >= 2 ? obs_DecayScore * 0.40 : 0.0)
+                          + (ede_state >= 3 ? obs_CurvatureScore * 0.30 : 0.0)
+                          + (ede_state >= 4 ? obs_LiquidityScore * 0.30 : 0.0), 100.0);
+   ede_dissipationProgress = MathMin((ede_state >= 2 ? 25.0 : 0.0) + (ede_state >= 3 ? 25.0 : 0.0)
+                          + (ede_state >= 4 ? 25.0 : 0.0) + (ede_state >= 5 ? 25.0 : 0.0), 100.0);
+
+   // --- RE ---
+   re_expectedCycles  = (int)MathMax(1, MathMin(waveDepth + 2, 4));
+   re_completedCycles = (int)MathMax(0, MathMin(entryCycle, re_expectedCycles));
+   re_recursiveCompletionScore = re_expectedCycles > 0 ? MathMin((double)re_completedCycles / re_expectedCycles * 100.0, 100.0) : 0.0;
+   re_residualEnergy = MathMax(0.0, ede_expansionEnergy - ede_dissipatedEnergy);
+   re_objectiveReached = ede_state >= 5;
+   re_fullDissipation  = ede_dissipationProgress >= 75.0;
+   re_absorbedAndReturned = (ph == "Demand Return" || ph == "Supply Return") && recursiveComplete;
+   re_resolutionState = (re_absorbedAndReturned && re_fullDissipation && re_recursiveCompletionScore >= 75.0) ? "RESOLVED" :
+                        (re_objectiveReached && ede_dissipationProgress >= 50.0) ? "PARTIALLY RESOLVED" : "UNRESOLVED";
+   re_residualEnergyScore = MathMin(re_residualEnergy, 100.0);
+
+   // --- EAE (primary) ---
+   if(f60_direction == 0) eae_primaryAttractorPrice = 0;
+   else if(re_resolutionState == "UNRESOLVED")
+      eae_primaryAttractorPrice = f60_direction == 1 ? (flipBot != 0 ? flipBot : g_close - atr * 2.0)
+                                                 : (flipTop != 0 ? flipTop : g_close + atr * 2.0);
+   else if(re_resolutionState == "PARTIALLY RESOLVED")
+      eae_primaryAttractorPrice = f60_direction == 1 ? (point4OriginLow != 0 ? point4OriginLow : g_close - atr)
+                                                 : (point4OriginHigh != 0 ? point4OriginHigh : g_close + atr);
+   else eae_primaryAttractorPrice = 0;
+   eae_primaryAttractorScore = MathMin(re_residualEnergyScore * 0.40
+                          + (re_resolutionState == "UNRESOLVED" ? 30.0 : re_resolutionState == "PARTIALLY RESOLVED" ? 20.0 : 5.0)
+                          + (eae_primaryAttractorPrice != 0 ? MathMax(0.0, 30.0 - MathAbs(g_close - eae_primaryAttractorPrice) / MathMax(atr, 1e-10) * 5.0) : 0.0), 100.0);
+   eae_primaryAttractorLabel = re_resolutionState == "UNRESOLVED" ? "Flip Zone (High Residual)" :
+                               re_resolutionState == "PARTIALLY RESOLVED" ? "Origin Zone (Partial)" : "No Active Attractor";
+
+   // --- EAE (secondary) — induction zone when UNRESOLVED (master spec §7.3) ---
+   if(re_resolutionState == "UNRESOLVED" && (inducZoneLow != 0 || inducZoneHigh != 0))
+      eae_secondaryAttractorPrice = f60_direction == 1 ? inducZoneLow : inducZoneHigh;
+   else eae_secondaryAttractorPrice = 0;
+   eae_secondaryAttractorScore = MathMin(re_residualEnergyScore * 0.25
+                          + (re_resolutionState == "PARTIALLY RESOLVED" ? 20.0 : 10.0)
+                          + (eae_secondaryAttractorPrice != 0 ? MathMax(0.0, 20.0 - MathAbs(g_close - eae_secondaryAttractorPrice) / MathMax(atr, 1e-10) * 5.0) : 0.0), 100.0);
+
+   // --- EAE (tertiary) — extension beyond primary (master spec §7.3) ---
+   double primRef = eae_primaryAttractorPrice != 0 ? eae_primaryAttractorPrice : g_close;
+   double secRef  = eae_secondaryAttractorPrice != 0 ? eae_secondaryAttractorPrice : primRef;
+   eae_tertiaryAttractorPrice = f60_direction == 1 ? MathMax(primRef, secRef) + atr * 2.0
+                              : f60_direction == -1 ? MathMin(primRef, secRef) - atr * 2.0 : 0;
+   double htfAlignBonus = (l2_dir == f60_direction && l4_dir == f60_direction) ? 25.0 : 0.0;
+   eae_tertiaryAttractorScore = MathMin(re_residualEnergyScore * 0.30 + htfAlignBonus
+                          + (re_resolutionState == "RESOLVED" ? 10.0 : 0.0), 100.0);
+
+   eae_energyState = ede_state == 1 ? "Accumulating" : ede_state == 2 ? "Cleaning" :
+                     ede_state <= 4 ? "Delivering" : ede_state == 5 ? "Exhausted" : "Resolving";
   }
+
+
+
+// CHART-BAR HELPERS (last closed bar = shift 1)
+//==================================================================
+double C1(int s){ return iClose(_Symbol,_Period,s); }
+double O1(int s){ return iOpen (_Symbol,_Period,s); }
+double H1b(int s){ return iHigh (_Symbol,_Period,s); }
+double L1b(int s){ return iLow  (_Symbol,_Period,s); }
+double f60_HH(int len,int start){ double m=-DBL_MAX; for(int i=start;i<start+len;i++){double v=H1b(i); if(v>m)m=v;} return m; }
+double f60_LL(int len,int start){ double m=DBL_MAX; for(int i=start;i<start+len;i++){double v=L1b(i); if(v<m)m=v;} return m; }
+
+//==================================================================
+// CHART PIVOT MEMORY (Pine Section 5) — spawn order-block anchor.
+//==================================================================
+double f60_lastPivotPrice=0, f60_prevPivotPrice=0; int lastPivotDir=0, prevPivotDir=0;
+int    g_chartBarCount=0;
+
+void f_updatePivots()
+  {
+   int pl = g_pivotLen;
+   // pivot confirmed at shift pl (need pl bars either side)
+   double hv=H1b(pl), lv=L1b(pl);
+   bool isH=true, isL=true;
+   for(int w=1; w<=2*pl; w++){ int s=w; if(s==pl)continue; if(H1b(s)>=hv)isH=false; if(L1b(s)<=lv)isL=false; }
+   double evP=0; int evD=0; bool has=false;
+   if(isH){ evP=hv; evD=1; has=true; }
+   else if(isL){ evP=lv; evD=-1; has=true; }
+   if(has){ f60_prevPivotPrice=f60_lastPivotPrice; prevPivotDir=lastPivotDir; f60_lastPivotPrice=evP; lastPivotDir=evD; }
+  }
+
+double f_findInducPrice(double anchorTop, double anchorBot, int lookback)
+  {
+   double best=0, bestDist=-1;
+   int maxI = MathMin(lookback, 200);
+   for(int i=1; i<=maxI; i++)
+     {
+      if(H1b(i) < anchorTop && L1b(i) > anchorBot)
+        {
+         double d = (double)i;
+         if(bestDist<0 || d<bestDist){ bestDist=d; best=(H1b(i)+L1b(i))/2.0; }
+        }
+     }
+   return best;
+  }
+
+//==================================================================
+// SECTION 10 — LIQUIDITY HEATMAP
+//==================================================================
+bool   liqSweepBull=false, liqSweepBear=false, liqVacuum=false, f60_liqSweepOK=false;
+double g_liqLevels[]; double g_liqWeights[]; int g_liqAges[];
+
+void f_updateLiquidity()
+  {
+   double atr=g_atr;
+   double swH=f60_HH(g_liqSweepLookback,1), swL=f60_LL(g_liqSweepLookback,1);
+   liqSweepBull = flipTop!=0 && swH>flipTop;
+   liqSweepBear = flipBot!=0 && swL<flipBot;
+   // push pivot level with weight (vol*range) when a chart pivot confirmed
+   int pl=g_pivotLen;
+   double hv=H1b(pl), lv=L1b(pl);
+   bool isH=true,isL=true;
+   for(int w=1;w<=2*pl;w++){int s=w; if(s==pl)continue; if(H1b(s)>=hv)isH=false; if(L1b(s)<=lv)isL=false;}
+   if(isH||isL)
+     {
+      double lvl = isH?hv:lv;
+      double volAvg=0; for(int i=1;i<=20;i++) volAvg += (double)iVolume(_Symbol,_Period,i); volAvg/=20.0;
+      double nv = volAvg>0 ? (double)iVolume(_Symbol,_Period,pl)/volAvg : 1.0;
+      double swRng=(H1b(pl)-L1b(pl))/MathMax(atr,1e-10);
+      int sz=ArraySize(g_liqLevels);
+      ArrayResize(g_liqLevels,sz+1);ArrayResize(g_liqWeights,sz+1);ArrayResize(g_liqAges,sz+1);
+      g_liqLevels[sz]=lvl; g_liqWeights[sz]=nv*swRng; g_liqAges[sz]=g_chartBarCount;
+      if(ArraySize(g_liqLevels)>150)
+        {
+         for(int a=0;a<ArraySize(g_liqLevels)-1;a++){g_liqLevels[a]=g_liqLevels[a+1];g_liqWeights[a]=g_liqWeights[a+1];g_liqAges[a]=g_liqAges[a+1];}
+         int ns=ArraySize(g_liqLevels)-1; ArrayResize(g_liqLevels,ns);ArrayResize(g_liqWeights,ns);ArrayResize(g_liqAges,ns);
+        }
+     }
+   double wDensity=0,wAbove=0,wBelow=0;
+   double rP=atr*g_liqRadius, rW=atr*g_liqRadius*3.0;
+   for(int i=0;i<ArraySize(g_liqLevels);i++)
+     {
+      double lvl=g_liqLevels[i], wt=g_liqWeights[i];
+      int age=g_chartBarCount-g_liqAges[i];
+      double dcy=MathPow(g_liqAgDecay,age);
+      double dist=MathAbs(g_close-lvl);
+      if(dist<rP) wDensity += wt*dcy;
+      if(dist<rW){ if(lvl>g_close) wAbove += wt*dcy*(1.0-dist/rW); else wBelow += wt*dcy*(1.0-dist/rW); }
+     }
+   double liqHeatRaw = MathMin((wAbove+wBelow)/2.0,5.0)/5.0*100.0;
+   f60_liqHeat = f_clamp(liqHeatRaw,0.0,100.0);
+   liqVacuum = wDensity<0.5;
+   f60_liqSweepOK = !g_requireLiqSweep || (f60_direction==1 && (liqSweepBull||liqVacuum)) || (f60_direction==-1 && (liqSweepBear||liqVacuum));
+  }
+
+//==================================================================
+// SECTION 12 — WAVE INTELLIGENCE (similarity, convexity maturity,
+// geometric progress, smoothed f60_waveProgress, f60_waveModelFit)
+//==================================================================
+double f60_waveProgress=30.0, f60_waveModelFit=50.0;
+
+double f_idealSim(double e,double d,double v,double c,double ei,double di,double vi,double ci)
+  {
+   double diff=MathPow(e-ei,2)+MathPow(d-di,2)+MathPow(v-vi,2)+MathPow(c-ci,2);
+   return MathMax(0.0,100.0*(1.0-diff/4.0));
+  }
+
+void f_updateWaveIntel()
+  {
+   double atr=g_atr;
+   double effN=MathMin(g_eff,1.0);
+   double dispN=MathMin(g_disp/MathMax(g_dispThresh*2.0,1e-10),1.0);
+   double velN=MathMin(MathAbs(g_vel)/MathMax(atr*0.15,1e-10),1.0);
+   double curvN=MathMin(MathAbs(g_csm)/MathMax(atr*g_convMult*2.0,1e-10),1.0);
+   double sExp=f_idealSim(effN,dispN,velN,curvN,0.85,0.80,0.80,0.10);
+   double sPre=f_idealSim(effN,dispN,velN,curvN,0.60,0.55,0.40,0.50);
+   double sInd=f_idealSim(effN,dispN,velN,curvN,0.65,0.60,0.30,0.60);
+   double sLiq=f_idealSim(effN,dispN,velN,curvN,0.45,0.85,0.15,0.80);
+   double sCre=f_idealSim(effN,dispN,velN,curvN,0.30,0.70,0.05,0.90);
+   double sAbs=f_idealSim(effN,dispN,velN,curvN,0.20,0.25,0.10,0.40);
+   double sRet=f_idealSim(effN,dispN,velN,curvN,0.70,0.65,0.65,0.25);
+   double sDem=f_idealSim(effN,dispN,velN,curvN,0.50,0.40,0.35,0.20);
+   double originToExtreme = 0;
+   if(point4OriginHigh!=0 && point4OriginLow!=0)
+     {
+      double orig = f60_direction==1?point4OriginLow:point4OriginHigh;
+      double extr = f60_direction==1?(cycleHigh!=0?cycleHigh:orig):(cycleLow!=0?cycleLow:orig);
+      originToExtreme=MathAbs(extr-orig);
+     }
+   double waveTotalRange = originToExtreme!=0?originToExtreme:atr*5.0;
+   double currentToExtreme = f60_direction==1?MathAbs((cycleHigh!=0?cycleHigh:g_close+atr)-g_close):MathAbs(g_close-(cycleLow!=0?cycleLow:g_close-atr));
+   double posNormDen=MathMax(waveTotalRange,atr*0.5);
+   double posDistToCreation=MathMin(currentToExtreme/posNormDen*100.0,100.0);
+   double expWeak=MathMin(((g_eff<g_effThresh?(1.0-g_eff/MathMax(g_effThresh,1e-10))*40.0:0.0)+obs_DecayScore*0.30+(MathAbs(g_vel)<MathAbs(g_vel)*0.6?20.0:0.0))*(100.0/90.0),100.0);
+   double indMat=MathMin((inductionEvidence?35.0:0.0)+obs_CurvatureScore*0.35+(preConvEvidence?20.0:0.0)+(g_disp>g_dispThresh*1.2&&(g_bullMomDecay||g_bearMomDecay)?10.0:0.0),100.0);
+   double liqMat=MathMin(obs_LiquidityScore*0.50+(liqSweepBull||liqSweepBear?30.0:0.0)+(f60_liqHeat>60?20.0:f60_liqHeat>30?10.0:0.0),100.0);
+   double rawConvMat=MathMin(expWeak*0.35+indMat*0.35+liqMat*0.30,100.0);
+   double alpha=2.0/(g_beliefSmooth+1);
+   convexityMaturity += alpha*(rawConvMat-convexityMaturity);
+   // geometric progress
+   double geomProg=30.0;
+   if(point4OriginHigh!=0 && flipTop!=0 && flipBot!=0)
+     {
+      double orig=f60_direction==1?point4OriginLow:point4OriginHigh;
+      double extr=f60_direction==1?(cycleHigh!=0?cycleHigh:g_close+atr):(cycleLow!=0?cycleLow:g_close-atr);
+      double fzMid=(flipTop+flipBot)/2.0;
+      double totalMove=MathAbs(extr-orig), toFz=MathAbs(extr-fzMid);
+      double expProg=totalMove>1e-10?MathMin(MathAbs(g_close-orig)/totalMove*60.0,60.0):30.0;
+      double retrMove=MathAbs(g_close-extr);
+      double retrProg=toFz>1e-10?MathMin(retrMove/MathMax(toFz,1e-10)*40.0,40.0):0.0;
+      geomProg=expProg+retrProg*MathMin(obs_AbsorptionScore/40.0,1.0);
+     }
+   double simAnchor =
+       (sDem>=sRet&&sDem>=sAbs&&sDem>=sCre&&sDem>=sExp)?95.0 :
+       (sRet>=sAbs&&sRet>=sCre&&sRet>=sExp)?87.0 :
+       (sAbs>=sCre&&sAbs>=sExp)?75.0 :
+       (sCre>=sLiq&&sCre>=sExp)?62.0 :
+       (sLiq>=sInd&&sLiq>=sExp)?52.0 :
+       (sInd>=sPre&&sInd>=sExp)?43.0 :
+       (sPre>=sExp)?33.0 : 22.0;
+   double convW=MathMax(0.0,1.0-MathAbs(simAnchor-47.5)/14.5);
+   double physProg=simAnchor+(convexityMaturity/100.0)*(simAnchor-33.0)*0.50*convW;
+   double rawWP=geomProg*0.60+physProg*0.40;
+   f60_waveProgress += alpha*(rawWP-f60_waveProgress);
+   f60_waveProgress=f_clamp(f60_waveProgress,0.0,100.0);
+   double bestSim=MathMax(sExp,MathMax(sPre,MathMax(sInd,MathMax(sLiq,MathMax(sCre,MathMax(sAbs,MathMax(sRet,sDem)))))));
+   double flipzoneWidth = (flipTop!=0&&flipBot!=0)?flipTop-flipBot:0;
+   double geomCons=MathMin((originToExtreme!=0&&originToExtreme>atr*2.0?30.0:0.0)+(flipzoneWidth!=0&&flipzoneWidth<atr*4.0?25.0:0.0)+((cycleHigh!=0||cycleLow!=0)?20.0:0.0)+(f60_direction!=0?25.0:0.0),100.0);
+   f60_waveModelFit += alpha*((bestSim*0.55+geomCons*0.45)-f60_waveModelFit);
+   f60_waveModelFit=f_clamp(f60_waveModelFit,0.0,100.0);
+  }
+
+//==================================================================
+// SECTION 12A — BELIEF ENGINE (6 EMA-smoothed beliefs)
+//==================================================================
+double f60_expansionBelief=0, convexityBelief=0, f60_creationBelief=0;
+double f60_absorptionBelief=0, f60_retracementBelief=0, demandReturnBelief=0;
+
+void f_updateBelief()
+  {
+   double atr=g_atr;
+   preConvEvidence = g_bullMomDecay || g_bearMomDecay;
+   inductionEvidence = (f60_direction==1 && g_bearImpulse && structBias==1) || (f60_direction==-1 && g_bullImpulse && structBias==-1);
+   bool liqEv = obs_LiquidityScore>50.0 && obs_DecayScore>40.0;
+   // similarity recomputed cheaply for belief terms (reuse approx via obs)
+   double sExp = obs_ExpansionScore, sCre = f60_creationBelief, sAbs = obs_AbsorptionScore;
+   double sRet = f60_retracementBelief, sDem = demandReturnBelief;
+   double expPosMult = f60_waveProgress<40.0?1.20:f60_waveProgress<60.0?0.80:0.50;
+   double rawExp = MathMin((obs_ExpansionScore*0.45+(g_bullImpulse||g_bearImpulse?30.0:0.0)+(g_eff>g_effThresh*1.1?15.0:0.0)+sExp*0.10)*expPosMult,100.0);
+   double convPosMult=(f60_waveProgress>=30.0&&f60_waveProgress<=65.0)?1.30:0.70;
+   double rawConv=MathMin((obs_DecayScore*0.30+obs_CurvatureScore*0.25+(preConvEvidence?15.0:0.0)+(inductionEvidence?10.0:0.0)+(liqEv?5.0:0.0)+convexityMaturity*0.08)*convPosMult,100.0);
+   double creatPosMult=(f60_waveProgress>=45.0&&f60_waveProgress<=68.0)?1.40:0.60;
+   double posDist=0;
+   double rawCreat=MathMin(((convexityMaturity>50?convexityMaturity*0.12:0.0)+(obs_DecayScore>60?obs_DecayScore*0.20:0.0)+(obs_LiquidityScore>50?obs_LiquidityScore*0.20:0.0)+(obs_AbsorptionScore>20?obs_AbsorptionScore*0.15:0.0)+((cycleHigh!=0&&cycleLow!=0&&((f60_direction==1&&H1b(1)>=cycleHigh*0.998)||(f60_direction==-1&&L1b(1)<=cycleLow*1.002)))?20.0:0.0))*creatPosMult,100.0);
+   double rawAbs=MathMin(obs_AbsorptionScore*0.50+(g_eff<g_effThresh*0.6?25.0:0.0)+(g_disp<g_dispThresh*0.5?15.0:0.0),100.0);
+   double rawRet=MathMin(((f60_direction==1&&g_bearImpulse)||(f60_direction==-1&&g_bullImpulse)?45.0:0.0)+(rawAbs>50?rawAbs*0.30:0.0)+(obs_CurvatureScore>40?15.0:0.0),100.0);
+   double rawDem=MathMin((flipTop!=0&&flipBot!=0&&g_close<=flipTop&&g_close>=flipBot?35.0:0.0)+(rawRet>60?rawRet*0.30:0.0)+(f60_liqHeat>50?f60_liqHeat*0.15:0.0)+(liqSweepBull||liqSweepBear?20.0:0.0),100.0);
+   double a=2.0/(g_beliefSmooth+1);
+   f60_expansionBelief    += a*(rawExp-f60_expansionBelief);
+   convexityBelief    += a*(rawConv-convexityBelief);
+   f60_creationBelief     += a*(rawCreat-f60_creationBelief);
+   f60_absorptionBelief   += a*(rawAbs-f60_absorptionBelief);
+   f60_retracementBelief  += a*(rawRet-f60_retracementBelief);
+   demandReturnBelief += a*(rawDem-demandReturnBelief);
+  }
+
+//==================================================================
+// SECTION 13 — WAVE SPAWN ENGINE + recursion (M5-governed)
+//==================================================================
+int    obBirthBar=0, contBar=0;
+int    g_recursiveFiredBar=-99999;
+
+void f_doSpawn(int newDir)
+  {
+   double atr=g_atr;
+   double obTop = g_se5.o.p4h!=0?g_se5.o.p4h:(newDir==1?f60_lastPivotPrice:f60_prevPivotPrice);
+   double obBot = g_se5.o.p4l!=0?g_se5.o.p4l:(newDir==1?f60_prevPivotPrice:f60_lastPivotPrice);
+   double fzIP  = f_findInducPrice(obTop, obBot, g_inducLookback);
+   f60_direction=newDir; flipTop=obTop; flipBot=obBot;
+   point4OriginHigh=obTop; point4OriginLow=obBot;
+   obBirthBar=g_chartBarCount; contBar=0;
+   inducZoneLow = fzIP!=0?fzIP-atr*g_inducZoneWidth:0;
+   inducZoneHigh= fzIP!=0?fzIP+atr*g_inducZoneWidth:0;
+   cycleHigh=H1b(1); cycleLow=L1b(1);
+   isRecursiveWave=false; entryCycle=0; waveDepth=0;
+  }
+
+void f_updateSpawn()
+  {
+   double atr=g_atr;
+   bool allowSpawn = l0_dir!=0 && l0_dir!=f60_direction;
+   if(allowSpawn) f_doSpawn(l0_dir);
+   if(f60_direction==1  && H1b(1)>(cycleHigh!=0?cycleHigh:H1b(1))) cycleHigh=H1b(1);
+   if(f60_direction==-1 && L1b(1)<(cycleLow!=0?cycleLow:L1b(1)))  cycleLow=L1b(1);
+
+   nearFlipzone = flipTop!=0 && flipBot!=0 && g_close<=flipTop*1.02 && g_close>=flipBot*0.98;
+   closeInside  = flipTop!=0 && g_close<=flipTop && g_close>=flipBot;
+
+   // recursion trigger (Demand/Supply Return, belief-gated)
+   bool priceInDemand = flipBot!=0 && L1b(1)<flipBot && point4OriginHigh!=0 && L1b(1)<=point4OriginHigh;
+   bool priceInSupply = flipTop!=0 && H1b(1)>flipTop && point4OriginLow!=0  && H1b(1)>=point4OriginLow;
+   bool trueCHoCHbull = f60_direction==1  && priceInDemand && g_bullImpulse && f60_liqSweepOK;
+   bool trueCHoCHbear = f60_direction==-1 && priceInSupply && g_bearImpulse && f60_liqSweepOK;
+   bool structFlipBull= f60_direction==1  && g_bullConvShift && structBias==-1;
+   bool structFlipBear= f60_direction==-1 && g_bearConvShift && structBias==1;
+   bool recursiveTrigger = (trueCHoCHbull||trueCHoCHbear||structFlipBull||structFlipBear)
+                           && (ie1a_currentPhase=="Demand Return"||ie1a_currentPhase=="Supply Return")
+                           && demandReturnBelief>40 && f60_direction!=0 && flipTop!=0;
+   if(recursiveTrigger && (g_chartBarCount-g_recursiveFiredBar)>g_resetBars)
+     {
+      g_recursiveFiredBar=g_chartBarCount;
+      recursiveComplete=true;
+      waveGeneration++;
+      entryCycle=(int)MathMin(entryCycle+1,4);
+      isRecursiveWave=true; waveDepth=entryCycle;
+      int nextDir = l0_dir!=0?l0_dir:((g_bullImpulse||g_bullConvShift)?1:-1);
+      f_doSpawn(nextDir);
+      contBar=g_chartBarCount;
+     }
+
+   // invalidation / soft reset
+   int barsSinceCont = contBar!=0?(g_chartBarCount-contBar):(obBirthBar!=0?(g_chartBarCount-obBirthBar):0);
+   bool bullInvalid = f60_direction==1  && g_close < flipBot - atr*0.5;
+   bool bearInvalid = f60_direction==-1 && g_close > flipTop + atr*0.5;
+   bool opposingMove= (f60_direction==1&&g_bearImpulse)||(f60_direction==-1&&g_bullImpulse);
+   bool hardInvalid = bullInvalid||bearInvalid;
+   bool softReset   = barsSinceCont>g_resetBars && opposingMove
+                      && ie1a_currentPhase!="Demand Return" && ie1a_currentPhase!="Supply Return"
+                      && demandReturnBelief<30 && f60_expansionBelief<30;
+   if(f60_direction!=l0_dir && (hardInvalid||softReset))
+     {
+      f60_direction=0; flipTop=0; flipBot=0; contBar=0; obBirthBar=0;
+      isRecursiveWave=false; entryCycle=0; waveDepth=0; recursiveComplete=false;
+     }
+  }
+
+//==================================================================
+// ENGINE 1A.7 — PRE-OBJECTIVE LIQUIDATION WAVE OVERLAY
+//==================================================================
+bool   f60_liqg_active=false, liqg_isRetr=false; int liqg_dir=0;
+double f60_liqg_target=0, liqg_initDist=0, liqg_distPct=0;
+bool   liqg_objArrival=false, liqg_trueCHoCH=false;
+string f60_liqg_subPhase="", liqg_title="";
+
+void f_updateLiqg()
+  {
+   double atr=g_atr;
+   bool retr = ie1a_currentPhase=="Retracement Induction";
+   bool arm  = ie1a_currentPhase=="Expansion Induction" || retr;
+   double obj = g_se5.o.tgt;
+   if(arm && !f60_liqg_active && obj!=0)
+     {
+      f60_liqg_active=true; liqg_isRetr=retr; f60_liqg_target=obj;
+      liqg_dir = obj>g_close?1:-1;
+      liqg_initDist=MathMax(MathAbs(obj-g_close),atr*0.5);
+     }
+   if(f60_liqg_active && obj!=0) f60_liqg_target=obj;
+   double remain = (f60_liqg_active && f60_liqg_target!=0)?MathAbs(f60_liqg_target-g_close):0;
+   liqg_distPct = (f60_liqg_active && remain!=0)?MathMin(100.0,remain/MathMax(liqg_initDist,1e-10)*100.0):0;
+   bool capExh = ede_dissipationProgress>60 || convexityMaturity>60;
+   bool resolved = re_resolutionState=="RESOLVED";
+   bool energyLo = g_eff<g_effThresh*0.7;
+   bool magnet = f60_liqg_active && liqg_distPct!=0 && liqg_distPct<20;
+   bool arrStruct = f60_liqg_active && f60_liqg_target!=0 && (liqg_dir==1?g_close>=f60_liqg_target:g_close<=f60_liqg_target);
+   bool arrPhys = capExh && (resolved||magnet);
+   liqg_objArrival = arrStruct && energyLo && arrPhys;
+   bool counterBOS = liqg_dir==1 ? g_se5.o.bos==-1 : g_se5.o.bos==1;
+   liqg_trueCHoCH = liqg_objArrival && counterBOS && energyLo && resolved;
+   f60_liqg_subPhase = !f60_liqg_active ? "" :
+       liqg_objArrival ? "Objective Arrival" :
+       (magnet&&energyLo) ? "Terminal Liquidation" :
+       (convexityMaturity>40||ede_dissipationProgress>40) ? "Induction" :
+       (liqg_distPct!=0&&liqg_distPct<70) ? "Displacement" :
+       (liqg_distPct!=0&&liqg_distPct<95) ? "Push" : "Initialization";
+   int dwd = l0_dir;
+   liqg_title = !f60_liqg_active ? "" :
+       (liqg_isRetr && dwd==-1) ? "Pre-Supply Return Liquidation Wave" :
+       liqg_isRetr ? "Pre-Demand Return Liquidation Wave" :
+       (dwd==-1) ? "Pre-New Low Liquidation Wave" : "Pre-New High Liquidation Wave";
+   bool inWindow = ie1a_currentPhase=="Expansion Induction"||ie1a_currentPhase=="Expansion Liquidity"||ie1a_currentPhase=="Retracement Induction"||ie1a_currentPhase=="Retracement Liquidity";
+   if(f60_liqg_active && (!inWindow || (liqg_objArrival && liqg_trueCHoCH))) f60_liqg_active=false;
+   f60_waveObj = f60_liqg_target!=0?f60_liqg_target:g_se5.o.tgt;
+  }
+
+//==================================================================
+// FRZ ENGINE (Future Return Zone) — component scoring + best live zone
+// (master spec §8). Simplified single-best tracking on chart bars.
+//==================================================================
+double f60_frz_bestScore=0, f60_frz_bestZoneMid=0, f60_frz_distanceToZone=0, f60_frz_confidence=0;
+string f60_frz_bestTier="-", f60_frz_bestClass="Weak", f60_frz_bestStatus="Open";
+int    f60_frz_bestDir=0, f60_frz_activeCount=0;
+double f60_frz_resolutionScore=0, f60_frz_residualEnergy=0, f60_frz_attractorWeight=0;
+bool   f60_frz_inProximity=false, f60_frz_attractorConvergence=false;
+
+void f_updateFRZ()
+  {
+   double atr=g_atr;
+   // component detection on the last closed chart bar
+   bool fu = g_bullImpulse || g_bearImpulse; // displacement proxy stands in for FU-prev gap
+   bool imb = g_disp > g_dispThresh;
+   bool liq = liqSweepBull || liqSweepBear || liqVacuum || obs_LiquidityScore>55.0;
+   bool dispC = g_bullImpulse || g_bearImpulse;
+   double scoreFU  = (g_bullImpulse||g_bearImpulse) ? 25.0 : 0.0;
+   double scoreIMB = imb ? 25.0 : 0.0;
+   double scoreLIQ = liq ? 25.0 : 0.0;
+   double scoreDisp= dispC ? 25.0 : 0.0;
+   double raw = scoreFU+scoreIMB+scoreLIQ+scoreDisp;
+   // spawn/refresh a best zone when score qualifies and a wave is active
+   if(raw>=26.0 && f60_direction!=0 && (scoreFU>0||scoreLIQ>0||scoreDisp>0))
+     {
+      double zoneMid = f60_direction==1 ? (flipBot!=0?flipBot:g_close) : (flipTop!=0?flipTop:g_close);
+      // keep the higher-scoring zone
+      if(raw>=f60_frz_bestScore || f60_frz_activeCount==0)
+        {
+         f60_frz_bestScore=raw; f60_frz_bestZoneMid=zoneMid; f60_frz_bestDir=f60_direction;
+         f60_frz_bestClass = raw>=76?"Exceptional":raw>=51?"Strong":raw>=26?"Moderate":"Weak";
+         f60_frz_bestTier  = raw>=76?"T1":raw>=51?"T2":(raw>=26&&scoreFU>0)?"T3":(raw>=26&&scoreIMB>0)?"T4":"-";
+         f60_frz_bestStatus="Open";
+         f60_frz_activeCount=1;
+        }
+     }
+   // lifecycle: invalidate if closed through from the wrong side
+   if(f60_frz_activeCount>0 && f60_frz_bestZoneMid!=0)
+     {
+      if(f60_frz_bestDir==1 && g_close < f60_frz_bestZoneMid - atr*0.1) f60_frz_bestStatus="Mitigated";
+      if(f60_frz_bestDir==-1 && g_close > f60_frz_bestZoneMid + atr*0.1) f60_frz_bestStatus="Mitigated";
+     }
+   f60_frz_inProximity = f60_frz_activeCount>0 && f60_frz_bestZoneMid!=0 && MathAbs(g_close-f60_frz_bestZoneMid)/MathMax(atr,1e-10) < 2.0;
+   f60_frz_distanceToZone = f60_frz_activeCount>0 ? MathAbs(g_close-f60_frz_bestZoneMid)/MathMax(atr,1e-10) : 0;
+   double tierBonus = f60_frz_bestTier=="T1"?30.0:f60_frz_bestTier=="T2"?20.0:10.0;
+   double statBonus = f60_frz_bestStatus=="Open"?30.0:f60_frz_bestStatus=="Partial"?15.0:0.0;
+   f60_frz_confidence = f60_frz_activeCount>0 ? f60_frz_bestScore*0.40 + statBonus + tierBonus : 0;
+   // FRZ <-> ERF unification
+   f60_frz_resolutionScore = re_resolutionState=="RESOLVED"?90.0 :
+                         re_resolutionState=="PARTIALLY RESOLVED"?50.0+re_recursiveCompletionScore*0.40 :
+                         20.0+ede_dissipationProgress*0.30;
+   f60_frz_residualEnergy = MathMax(0.0,100.0-f60_frz_resolutionScore);
+   double stBon2 = f60_frz_bestStatus=="Open"?20.0:f60_frz_bestStatus=="Partial"?10.0:0.0;
+   f60_frz_attractorWeight = f60_frz_residualEnergy*0.50 + f60_frz_bestScore*0.30 + stBon2;
+   f60_frz_attractorConvergence = f60_frz_activeCount>0 && eae_primaryAttractorPrice!=0
+                              && MathAbs(eae_primaryAttractorPrice-f60_frz_bestZoneMid)/MathMax(atr,1e-10) < 0.5;
+  }
+
+
+//==================================================================
+// ENGINE 8.0 — TIME INTELLIGENCE ENGINE (TIE) — 5-cycle stack
+//   Cycle objects MN/W/D/H4/H1 (Pine exact). bias/state/completion/
+//   taken flags; timeDir/f60_timeAlign/f60_timeConflict; h1Timing/h1LowProb;
+//   tSeq sequence string.
+//==================================================================
+int    timeDir=0;
+double f60_timeAlign=50.0, f60_timeConflict=0.0, h1LowProb=50.0;
+string h1Timing="BALANCED", tSeq="";
+// per-cycle taken flags (consumed by dashboard / Senzo)
+bool   tMnHt=false,tMnLt=false,tWHt=false,tWLt=false,tDHt=false,tDLt=false;
+bool   tH4Ht=false,tH4Lt=false,tH1Ht=false,tH1Lt=false;
+
+int f_tBias(double o){ return g_close>o?1:g_close<o?-1:0; }
+
+void f_cycle(ENUM_TIMEFRAMES tf, double &o,double &h,double &l,double &ph,double &pl,bool &ht,bool &lt,double &elapsed)
+  {
+   o = iOpen(_Symbol,tf,0);
+   h = iHigh(_Symbol,tf,0);
+   l = iLow (_Symbol,tf,0);
+   ph= iHigh(_Symbol,tf,1);
+   pl= iLow (_Symbol,tf,1);
+   ht = h>ph; lt = l<pl;
+   datetime ct = iTime(_Symbol,tf,0);
+   elapsed = f_clamp((double)(TimeCurrent()-ct)/MathMax((double)PeriodSeconds(tf),1.0),0.0,1.0);
+  }
+
+void f_updateTIE()
+  {
+   double mnO,mnH,mnL,mnPH,mnPL,mnEl; f_cycle(PERIOD_MN1,mnO,mnH,mnL,mnPH,mnPL,tMnHt,tMnLt,mnEl);
+   double wO,wH,wL,wPH,wPL,wEl;       f_cycle(PERIOD_W1, wO,wH,wL,wPH,wPL,tWHt,tWLt,wEl);
+   double dO,dH,dL,dPH,dPL,dEl;       f_cycle(PERIOD_D1, dO,dH,dL,dPH,dPL,tDHt,tDLt,dEl);
+   double h4O,h4H,h4L,h4PH,h4PL,h4El; f_cycle(PERIOD_H4, h4O,h4H,h4L,h4PH,h4PL,tH4Ht,tH4Lt,h4El);
+   double h1O,h1H,h1L,h1PH,h1PL,h1El; f_cycle(PERIOD_H1, h1O,h1H,h1L,h1PH,h1PL,tH1Ht,tH1Lt,h1El);
+
+   int tBull=(f_tBias(mnO)==1)+(f_tBias(wO)==1)+(f_tBias(dO)==1)+(f_tBias(h4O)==1)+(f_tBias(h1O)==1);
+   int tBear=(f_tBias(mnO)==-1)+(f_tBias(wO)==-1)+(f_tBias(dO)==-1)+(f_tBias(h4O)==-1)+(f_tBias(h1O)==-1);
+   timeDir = tBull>tBear?1:tBear>tBull?-1:0;
+   f60_timeAlign = (tBull+tBear)>0 ? MathMax(tBull,tBear)/(double)(tBull+tBear)*100.0 : 50.0;
+   f60_timeConflict = 100.0-f60_timeAlign;
+   // h1 low probability
+   double pos = (g_close-h1L)/MathMax(h1H-h1L,_Point);
+   h1LowProb = (tH1Lt&&!tH1Ht)?30.0:(tH1Ht&&!tH1Lt)?70.0:MathRound(pos*100.0);
+   h1Timing = (tH1Ht&&tH1Lt)?"COMPLETION":h1LowProb>=55?"LOW FIRST":h1LowProb<=45?"HIGH FIRST":"BALANCED";
+   tSeq = (!tH1Lt?"take H1 low":!tH1Ht?"take H1 high":"H1 done")
+        + " -> H4 " + (f_tBias(h4O)==1?"up":"down")
+        + " -> D "  + (f_tBias(dO)==1?"highs":"lows")
+        + " -> W "  + (f_tBias(wO)==1?"highs":"lows");
+  }
+
+
+//==================================================================
+// F72 — CURVE OBJECT + RECURSIVE CURVE TREE
+//==================================================================
+struct CurveF
+  {
+   int dir; double origin, extreme, dispATR, eIn, eDiss, eRes, convex, compress, maturity;
+  };
+CurveF f60_gCurve;
+
+struct CurveNodeF
+  {
+   int    id, parent, dir, depth, bar, srcTf;
+   double origin, extreme, energy, comp, mat;
+   bool   alive;
+   string state;
+  };
+CurveNodeF g_tree[];
+int    g_nodeSeq=0;
+string gNodePhase="";          // emergent (OBSERVATIONAL ONLY — not authority)
+
+// owner / tree summary
+int    _ownDirT=0, _ownDepthT=0, _ownSrc=5, _treeAlive=0, _treeDepth=0, _curveBudgetDepth=1;
+double _ownNrgT=0, _ownOrig=0, _ownExt=0;
+string _ownState="—";
+// compression persistence + life
+double _cmpHist[6]; int _cmpHistN=0;
+double _cpForce=50.0, f60_life=50.0, _mig50=0, _mig618=0;
+string _cpState="NEUTRAL", _cpTrend="→ stable", _aliveTx="◐ WEAKENING · MANAGE", _htfThreat="—";
+double _parentThreat=0, _htfRoomAtr=0, _retrX=50.0;
+bool   _progressing=false, _recursionComplete=false;
+// lineage + chain
+int    _narrDir=0, _supVotes=0, _degVotes=0;
+double _legX=0, _legPBdepth=0, _narrative=50.0, _wholeChainLife=50.0, _chainVitality=50.0;
+string _narrState="HOLDING", _lastVote="—", _chainScope="healthy";
+bool   _converging=false;
+double _seqRetr[]; double _lifeSeq[];
+// MTF map
+int    mtfAlignN=0; string mtfStory="", mtfOwnerL="";
+
+string f_nodeState(int d,double e,int dep,double cmp,double mat)
+  {
+   if(dep>0) return e>=70.0?"Transition · recursive expansion":e>=40.0?"Transition · recursive induction":"Transition · recursive liquidation";
+   if(mat<12.0) return "Point 4 Origin";
+   if(e>=78.0 && mat>=70.0) return d==1?"New High":d==-1?"New Low":"Climax";
+   if(mat<35.0) return "Expansion";
+   if(mat<55.0) return "Expansion Pre-Convexity";
+   if(e>=55.0) return "Expansion Induction";
+   if(e>=35.0) return "Expansion Liquidity";
+   if(cmp>=60.0) return "Retracement Pre-Convexity";
+   if(e>=18.0) return "Retracement Induction";
+   return "Retracement";
+  }
+
+void f_updateCurve()
+  {
+   double atr=g_atr;
+   int cvDir = l0_dir;
+   double cvOrig = g_se5.o.inv;
+   double cvExt = cvDir==1?(cycleHigh!=0?cycleHigh:H1b(1)):cvDir==-1?(cycleLow!=0?cycleLow:L1b(1)):g_close;
+   double cvDisp = cvOrig!=0?MathAbs(cvExt-cvOrig)/MathMax(atr,1e-10):0;
+   double cvComp = f_clamp((1.0-MathMin(g_disp/MathMax(g_dispThresh,1e-10),1.0))*60.0+(1.0-MathMin(g_eff/MathMax(g_effThresh,1e-10),1.0))*40.0,0.0,100.0);
+   f60_gCurve.dir=cvDir; f60_gCurve.origin=cvOrig; f60_gCurve.extreme=cvExt; f60_gCurve.dispATR=cvDisp;
+   f60_gCurve.eIn=ede_expansionEnergy; f60_gCurve.eDiss=ede_dissipatedEnergy; f60_gCurve.eRes=re_residualEnergyScore;
+   f60_gCurve.convex=f60_convexityScore; f60_gCurve.compress=(g_se5.o.comp!=0?g_se5.o.comp:cvComp); f60_gCurve.maturity=f60_waveProgress;
+
+   bool bullCHoCH = g_se5.o.ch==1, bearCHoCH = g_se5.o.ch==-1;
+
+   // pre-owner (Principle 8): shallowest alive with energy>=12
+   double ownMinE=12.0;
+   int preOwn=-1; double preE=-1; int preDepth=999;
+   int sz=ArraySize(g_tree);
+   for(int i=0;i<sz;i++)
+      if(g_tree[i].alive && g_tree[i].energy>=ownMinE && (g_tree[i].depth<preDepth || (g_tree[i].depth==preDepth && g_tree[i].energy>preE)))
+        { preDepth=g_tree[i].depth; preE=g_tree[i].energy; preOwn=i; }
+   if(preOwn<0)
+      for(int i=0;i<sz;i++) if(g_tree[i].alive && g_tree[i].energy>preE){ preE=g_tree[i].energy; preOwn=i; }
+
+   // context anchor (Chart wave root)
+   int ctxDir=l0_dir; double ctxOrig=cvOrig; int ctxSrc=0;
+   double ctxExt = ctxDir==1?MathMax(cycleHigh!=0?cycleHigh:H1b(1),H1b(1)):ctxDir==-1?MathMin(cycleLow!=0?cycleLow:L1b(1),L1b(1)):g_close;
+   if(preOwn<0 && ctxDir!=0 && ctxOrig!=0)
+     {
+      g_nodeSeq++;
+      int k=ArraySize(g_tree); ArrayResize(g_tree,k+1);
+      g_tree[k].id=g_nodeSeq; g_tree[k].parent=-1; g_tree[k].dir=ctxDir; g_tree[k].origin=ctxOrig;
+      g_tree[k].extreme=ctxExt; g_tree[k].energy=MathMax(40.0,ede_expansionEnergy>0?ede_expansionEnergy:60.0);
+      g_tree[k].alive=true; g_tree[k].depth=0; g_tree[k].bar=g_chartBarCount; g_tree[k].srcTf=ctxSrc; g_tree[k].comp=0; g_tree[k].mat=0;
+      g_tree[k].state="Point 4 Origin";
+     }
+
+   // compression budget
+   _curveBudgetDepth = (int)MathMax(1,MathMin(4,1+MathRound(f60_gCurve.compress/33.0)));
+
+   // event-generated child on Phase-2 CHoCH against owner
+   if(preOwn>=0)
+     {
+      CurveNodeF po=g_tree[preOwn];
+      if(((po.dir==1 && bearCHoCH)||(po.dir==-1 && bullCHoCH)) && (po.depth+1<=_curveBudgetDepth))
+        {
+         g_nodeSeq++;
+         int k=ArraySize(g_tree); ArrayResize(g_tree,k+1);
+         g_tree[k].id=g_nodeSeq; g_tree[k].parent=po.id; g_tree[k].dir=-po.dir; g_tree[k].origin=g_close;
+         g_tree[k].extreme=g_close; g_tree[k].energy=MathMax(25.0,(ede_expansionEnergy>0?ede_expansionEnergy:50.0)*0.85);
+         g_tree[k].alive=true; g_tree[k].depth=po.depth+1; g_tree[k].bar=g_chartBarCount; g_tree[k].srcTf=0; g_tree[k].comp=0; g_tree[k].mat=0;
+         g_tree[k].state=f_nodeState(-po.dir,g_tree[k].energy,po.depth+1,0,0);
+        }
+     }
+
+   // update living nodes
+   sz=ArraySize(g_tree);
+   for(int i=0;i<sz;i++)
+     {
+      if(!g_tree[i].alive) continue;
+      if(g_tree[i].depth==0)
+        {
+         g_tree[i].dir = g_tree[i].srcTf==6?l4_dir:g_tree[i].srcTf==5?l2_dir:l0_dir;
+         g_tree[i].origin = g_tree[i].srcTf==6?g_se240.o.inv:g_tree[i].srcTf==5?g_se60.o.inv:g_se5.o.inv;
+         g_tree[i].extreme = g_tree[i].srcTf==6?(g_tree[i].dir==1?g_se240.o.sh:g_se240.o.sl):g_tree[i].srcTf==5?(g_tree[i].dir==1?g_se60.o.sh:g_se60.o.sl):(g_tree[i].dir==1?g_se5.o.sh:g_se5.o.sl);
+        }
+      bool prog = g_tree[i].dir==1?H1b(1)>(g_tree[i].extreme!=0?g_tree[i].extreme:H1b(1)):L1b(1)<(g_tree[i].extreme!=0?g_tree[i].extreme:L1b(1));
+      if(g_tree[i].depth!=0)
+         g_tree[i].extreme = g_tree[i].dir==1?MathMax(g_tree[i].extreme!=0?g_tree[i].extreme:H1b(1),H1b(1)):MathMin(g_tree[i].extreme!=0?g_tree[i].extreme:L1b(1),L1b(1));
+      g_tree[i].energy = prog?MathMin(100.0,g_tree[i].energy+7.0):MathMax(0.0,g_tree[i].energy-2.0);
+      g_tree[i].mat  = g_tree[i].srcTf==6?(g_se240.o.wp!=0?g_se240.o.wp:f60_gCurve.maturity):g_tree[i].srcTf==5?(g_se60.o.wp!=0?g_se60.o.wp:f60_gCurve.maturity):(g_se5.o.wp!=0?g_se5.o.wp:f60_gCurve.maturity);
+      g_tree[i].comp = g_tree[i].srcTf==6?(g_se240.o.comp!=0?g_se240.o.comp:f60_gCurve.compress):g_tree[i].srcTf==5?(g_se60.o.comp!=0?g_se60.o.comp:f60_gCurve.compress):(g_se5.o.comp!=0?g_se5.o.comp:f60_gCurve.compress);
+      g_tree[i].state = f_nodeState(g_tree[i].dir,g_tree[i].energy,g_tree[i].depth,g_tree[i].comp,g_tree[i].mat);
+      if(g_tree[i].energy<=2.0) g_tree[i].alive=false;
+     }
+   // cap tree size to 60 (shift oldest)
+   while(ArraySize(g_tree)>60)
+     {
+      for(int a=0;a<ArraySize(g_tree)-1;a++) g_tree[a]=g_tree[a+1];
+      ArrayResize(g_tree,ArraySize(g_tree)-1);
+     }
+
+   // final owner (shallowest alive with energy>=12)
+   _treeAlive=0; _treeDepth=0; int ownF=-1; double ownFE=-1; int ownDepth=999;
+   sz=ArraySize(g_tree);
+   for(int i=0;i<sz;i++)
+     {
+      if(!g_tree[i].alive) continue;
+      _treeAlive++; _treeDepth=MathMax(_treeDepth,g_tree[i].depth);
+      if(g_tree[i].energy>=ownMinE && (g_tree[i].depth<ownDepth || (g_tree[i].depth==ownDepth && g_tree[i].energy>ownFE)))
+        { ownDepth=g_tree[i].depth; ownFE=g_tree[i].energy; ownF=i; }
+     }
+   if(ownF<0)
+      for(int i=0;i<sz;i++) if(g_tree[i].alive && g_tree[i].energy>ownFE){ ownFE=g_tree[i].energy; ownF=i; }
+   _ownDirT = ownF>=0?g_tree[ownF].dir:0;
+   _ownDepthT = ownF>=0?g_tree[ownF].depth:0;
+   _ownNrgT = ownF>=0?g_tree[ownF].energy:0;
+   _ownState = ownF>=0?g_tree[ownF].state:"—";
+   gNodePhase = _ownState;   // OBSERVATIONAL ONLY — Engine 1A canonical phase unchanged
+   _ownSrc = ownF>=0?g_tree[ownF].srcTf:5;
+   _ownOrig = _ownSrc==6?g_se240.o.inv:_ownSrc==5?g_se60.o.inv:g_se5.o.inv;
+   _ownExt  = _ownSrc==6?(_ownDirT==1?g_se240.o.sh:g_se240.o.sl):_ownSrc==5?(_ownDirT==1?g_se60.o.sh:g_se60.o.sl):(_ownDirT==1?g_se5.o.sh:g_se5.o.sl);
+
+   // compression persistence
+   double cmpNow=f60_gCurve.compress;
+   double cmp5 = _cmpHistN>=6?_cmpHist[0]:cmpNow;
+   double tighten=cmpNow-cmp5;
+   // push history ring (len 6)
+   for(int a=0;a<5;a++) _cmpHist[a]=_cmpHist[a+1];
+   _cmpHist[5]=cmpNow; if(_cmpHistN<6)_cmpHistN++;
+   _cpForce=f_clamp(cmpNow*0.50+f60_gCurve.eRes*0.20-_treeDepth*12.0+MathMax(0.0,tighten)*0.8+8.0,0.0,100.0);
+   _cpState=_cpForce>=60.0?"PERSISTING":_cpForce<=35.0?"LEAKING":"NEUTRAL";
+   _cpTrend=tighten>3.0?"↑ tightening":tighten<-3.0?"↓ broadening":"→ stable";
+
+   // life
+   _recursionComplete = _curveBudgetDepth>0 && _treeDepth>=_curveBudgetDepth;
+   bool attacking = _ownDirT==1?H1b(1)>=(_ownExt!=0?_ownExt:H1b(1)):_ownDirT==-1?L1b(1)<=(_ownExt!=0?_ownExt:L1b(1)):false;
+   bool trendImp = (_ownDirT==1&&g_bullImpulse)||(_ownDirT==-1&&g_bearImpulse);
+   _progressing = attacking||trendImp;
+   _retrX = (_ownExt==0||_ownOrig==0||_ownExt==_ownOrig)?50.0:MathMin(100.0,MathAbs(_ownExt-g_close)/MathAbs(_ownExt-_ownOrig)*100.0);
+   _parentThreat = _ownDirT==1?(g_se240.o.ft!=0&&g_se240.o.ft>g_close?g_se240.o.ft:g_se240.o.sh):_ownDirT==-1?(g_se240.o.fb!=0&&g_se240.o.fb<g_close?g_se240.o.fb:g_se240.o.sl):0;
+   _htfRoomAtr = _parentThreat==0?0:MathAbs(_parentThreat-g_close)/MathMax(atr,1e-10);
+   _htfThreat = _parentThreat==0?"—":_htfRoomAtr>3.0?"CLEAR runway":_htfRoomAtr>1.0?"APPROACHING":"AT ZONE";
+   f60_life=f_clamp(_cpForce*0.45+f60_gCurve.eRes*0.30+(tighten>0.0?12.0:0.0)
+        -(_recursionComplete&&!_progressing?25.0:0.0)-(_cpState=="LEAKING"&&!_progressing?20.0:0.0)
+        +(_progressing?28.0:0.0)+(_retrX<25.0?16.0:_retrX<45.0?6.0:_retrX>75.0?-12.0:0.0)+10.0,0.0,100.0);
+   string aliveCounter=_ownDirT==1?"▼ SHORT":"▲ LONG";
+   _aliveTx = (_htfThreat=="AT ZONE"&&f60_life>=45.0)?"◆ ALIVE · AT "+f_tfLabel(g_wtf6)+" — VIGILANT":
+              _progressing&&f60_life>=45.0?"▲ ALIVE · ATTACKING EXTREME":
+              f60_life>=60.0?"● ALIVE · HOLD":f60_life<=32.0?"✕ DEAD · FLIP "+aliveCounter:"◐ WEAKENING · MANAGE";
+   _mig50  = (_ownOrig==0||_ownExt==0)?0:_ownExt+0.5*(_ownOrig-_ownExt);
+   _mig618 = (_ownOrig==0||_ownExt==0)?0:_ownExt+0.618*(_ownOrig-_ownExt);
+
+   // narrative lineage
+   if(_ownDirT!=_narrDir)
+     {
+      _narrDir=_ownDirT;
+      _legX=_ownDirT==1?H1b(1):_ownDirT==-1?L1b(1):0;
+      _legPBdepth=0; _narrative=50.0; _supVotes=0; _degVotes=0; _lastVote="—";
+      ArrayResize(_seqRetr,0); ArrayResize(_lifeSeq,0);
+     }
+   if(_ownDirT!=0 && _ownOrig!=0)
+     {
+      bool newLegX=_ownDirT==1?H1b(1)>(_legX!=0?_legX:H1b(1)):L1b(1)<(_legX!=0?_legX:L1b(1));
+      if(newLegX)
+        {
+         if(_legPBdepth>6.0)
+           {
+            bool sup=_legPBdepth<=50.0 && tighten>=-1.0;
+            bool deg=_legPBdepth>=62.0 || tighten<-3.0;
+            int vote=sup?1:deg?-1:0;
+            _lastVote=vote==1?"SUPPORT":vote==-1?"DEGRADE":"NEUTRAL";
+            _supVotes+=(vote==1?1:0); _degVotes+=(vote==-1?1:0);
+            _narrative=f_clamp(_narrative+vote*12.0+(tighten>0.0?3.0:-3.0),0.0,100.0);
+            int k=ArraySize(_seqRetr); ArrayResize(_seqRetr,k+1); _seqRetr[k]=_legPBdepth;
+            if(ArraySize(_seqRetr)>5){ for(int a=0;a<ArraySize(_seqRetr)-1;a++)_seqRetr[a]=_seqRetr[a+1]; ArrayResize(_seqRetr,ArraySize(_seqRetr)-1); }
+            int k2=ArraySize(_lifeSeq); ArrayResize(_lifeSeq,k2+1); _lifeSeq[k2]=f60_life;
+            if(ArraySize(_lifeSeq)>5){ for(int a=0;a<ArraySize(_lifeSeq)-1;a++)_lifeSeq[a]=_lifeSeq[a+1]; ArrayResize(_lifeSeq,ArraySize(_lifeSeq)-1); }
+           }
+         _legX=_ownDirT==1?H1b(1):L1b(1); _legPBdepth=0;
+        }
+      else
+        {
+         double pbd=MathAbs((_legX!=0?_legX:g_close)-_ownOrig)>1e-9?MathAbs((_legX!=0?_legX:g_close)-g_close)/MathAbs((_legX!=0?_legX:g_close)-_ownOrig)*100.0:0;
+         _legPBdepth=MathMax(_legPBdepth,pbd);
+        }
+     }
+   _narrState=_narrative>=65.0?"STRENGTHENING":_narrative<=35.0?"WEAKENING":"HOLDING";
+   _converging = ArraySize(_seqRetr)>=2 && _seqRetr[ArraySize(_seqRetr)-1]<_seqRetr[ArraySize(_seqRetr)-2];
+   _wholeChainLife += 0.02*(f60_life-_wholeChainLife);
+   _chainVitality = ArraySize(_lifeSeq)>=2?f_clamp(50.0+(_lifeSeq[ArraySize(_lifeSeq)-1]-_lifeSeq[0]),0.0,100.0):_wholeChainLife;
+   _chainScope=f60_life>=50.0?"healthy":_chainVitality>=50.0?"CURVE only · chain intact":_wholeChainLife>=45.0?"CHAIN weakening":"WHOLE CHAIN decaying";
+
+   // MTF curve map
+   mtfAlignN=(m1_dir==_ownDirT)+(l3_dir==_ownDirT)+(l0_dir==_ownDirT)+(l1_dir==_ownDirT)+(l2_dir==_ownDirT)+(l4_dir==_ownDirT);
+   mtfStory=_ownDirT==0?"no dominant owner":mtfAlignN>=5?"all TFs aligned → strong continuation":mtfAlignN>=4?"HTFs lead · LTFs following":mtfAlignN<=2?"LTFs counter HTF → pullback / transition":"mixed → rotation";
+   mtfOwnerL=(g_se240.o.wp>10&&g_se240.o.wp<90)?f_tfLabel(g_wtf6):(g_se60.o.wp>10&&g_se60.o.wp<90)?f_tfLabel(g_wtf5):(g_se15.o.wp>10&&g_se15.o.wp<90)?f_tfLabel(g_wtf4):(g_se5.o.wp>10&&g_se5.o.wp<90)?f_tfLabel(g_wtf3):(g_se3.o.wp>10&&g_se3.o.wp<90)?f_tfLabel(g_wtf2):f_tfLabel(g_wtf1);
+  }
+
+
+//==================================================================
+// PART D — SENSEEI META-INTELLIGENCE  (Pine exact)
+//==================================================================
+int    sen_master=0;
+double sen_alignment=50, sen_conflict=0, sen_threat=0, sen_confidence=0, sen_oppScore=0;
+string sen_timing="DEVELOPING", sen_intent="BALANCE", sen_opportunity="NONE", sen_action="WAIT";
+int    sen_resCode=0; double sen_residual=0, sen_attractor=0;
+
+void f_updateSenseei()
+  {
+   int v1=f60_waveDir, v2=f60_stackDir, v3=g_netBias, v4=g_pdir;
+   int sum=v1+v2+v3+v4;
+   sen_master = sum>0?1:sum<0?-1:0;
+   int cast=(v1!=0)+(v2!=0)+(v3!=0)+(v4!=0);
+   int forV=(v1==sen_master&&v1!=0)+(v2==sen_master&&v2!=0)+(v3==sen_master&&v3!=0)+(v4==sen_master&&v4!=0);
+   sen_alignment = cast>0?(double)forV/cast*100.0:50.0;
+   sen_conflict  = cast>0?(double)(cast-forV)/cast*100.0:0.0;
+   sen_residual  = re_residualEnergyScore;
+   sen_resCode   = re_resolutionState=="RESOLVED"?2:re_resolutionState=="PARTIALLY RESOLVED"?1:0;
+   sen_attractor = eae_primaryAttractorScore;
+   sen_threat = f_clamp(sen_conflict*0.40 + sen_residual*0.28 + f60_timeConflict*0.12
+                + (g_pdir!=0 && g_pdir!=sen_master?18.0:0.0) + (sen_resCode==1?10.0:0.0), 0.0,100.0);
+   sen_confidence = f_clamp(sen_alignment*0.40 + f60_timeAlign*0.12 + f60_stackPct*0.18 + sen_attractor*0.15
+                + MathMin(15.0,g_eligibleNodes*1.2) - sen_threat*0.20, 0.0,100.0);
+   string ph=ie1a_currentPhase;
+   sen_timing = (StringFind(ph,"Absorption")>=0||sen_resCode==2)?"RESOLVED":
+                f60_waveProgress<15?"VERY EARLY":f60_waveProgress<35?"EARLY":f60_waveProgress<55?"DEVELOPING":
+                f60_waveProgress<80?"MID CYCLE":f60_waveProgress<96?"LATE":"TERMINAL";
+   sen_intent = sen_conflict>55?"ABSORPTION":f60_liqg_active?"DELIVERY":
+                (StringFind(ph,"Expansion")>=0&&StringFind(ph,"Pre-Convexity")<0&&StringFind(ph,"Induction")<0&&StringFind(ph,"Liquidity")<0)?"EXPANSION":
+                StringFind(ph,"Pre-Convexity")>=0?"CONTINUATION":
+                StringFind(ph,"Induction")>=0?"RESOLUTION":
+                StringFind(ph,"Liquidity")>=0?"DELIVERY":
+                (StringFind(ph,"New High")>=0||StringFind(ph,"New Low")>=0)?"DELIVERY":
+                sen_master==0?"BALANCE":"CONTINUATION";
+   sen_oppScore = f_clamp(sen_alignment*0.40 + sen_attractor*0.30 + f60_stackPct*0.30 - sen_threat*0.35, 0.0,100.0);
+   sen_opportunity = sen_master==0?"NONE":sen_conflict>60?"DEVELOPING":sen_oppScore<20?"NONE":
+                     sen_oppScore<40?"DEVELOPING":sen_oppScore<62?"GOOD":sen_oppScore<82?"STRONG":"EXCEPTIONAL";
+   sen_action = sen_master==0?"WAIT":sen_conflict>60?"WAIT":sen_resCode==2?"MANAGE / EXIT":
+                ((sen_opportunity=="STRONG"||sen_opportunity=="EXCEPTIONAL")&&sen_confidence>=g_minConf&&sen_threat<45)?"ATTACK":
+                (sen_opportunity=="GOOD"||sen_opportunity=="STRONG")?"PREPARE":"WAIT";
+  }
+
+//==================================================================
+// SENZO — trader voice (compact synthesis from curve tree + MTF +
+// F60 lifecycle + energy + threat) — for the dashboard / heartbeat.
+//==================================================================
+string snz_line1="", snz_line2="", snz_line3="", snz_line4="", snz_line5="";
+
+void f_updateSenzo()
+  {
+   string biasV = sen_master==1?"Bias is up top":sen_master==-1?"We're leaning short":"Market can't pick a side";
+   string f60 = "F60: "+ie1a_currentPhase;
+   string engV = ede_state<=1?"energy still building, early":ede_state==2?"first dissipation underway":
+                 ede_state==3?"inducement working, trap being set":(ede_state>=4&&ede_state<=5)?"in delivery — business end":
+                 re_resolutionState=="RESOLVED"?"done its job, energy clean":"unresolved, "+DoubleToString(re_residualEnergyScore,0)+"% left";
+   snz_line1 = biasV+" · "+f60;
+   snz_line2 = _ownDirT==0?"curve tree: no owner yet":(_ownDirT==1?"bull":"bear")+" curve owns · "+_ownState+" · life "+DoubleToString(f60_life,0);
+   snz_line3 = _cpState=="PERSISTING"?"compression holding "+_cpTrend+" — stay with owner":
+               _cpState=="LEAKING"?"force leaking "+_cpTrend+" — ownership ready to flip":"force neutral "+_cpTrend;
+   snz_line4 = mtfStory=="no dominant owner"?"no clear MTF lead · "+engV:mtfStory+" ("+IntegerToString(mtfAlignN)+"/6, "+mtfOwnerL+" drives) · "+engV;
+   snz_line5 = sen_action=="ATTACK"?"BOTTOM LINE: I'd take the shot":sen_action=="PREPARE"?"BOTTOM LINE: get ready — not yet":
+               StringFind(sen_action,"MANAGE")>=0?"BOTTOM LINE: manage what you're holding":"BOTTOM LINE: sit on your hands";
+  }
+
+//==================================================================
+// ATTACK SEQUENCE (Pine) — entry / stop / targets, every bar.
+//==================================================================
+double atkEntryPx=0, atkStopPx=0, atkT1Px=0, atkT2Px=0, atkT3Px=0;
+int    atkBias=0;
+
+void f_updateAttack()
+  {
+   atkEntryPx = (flipTop!=0 && flipBot!=0)?(flipTop+flipBot)/2.0:0;
+   atkStopPx  = g_se5.o.inv;
+   atkT1Px    = f60_waveObj;
+   atkT2Px    = g_se15.o.tgt;
+   atkT3Px    = g_se60.o.tgt;
+   atkBias = (atkEntryPx==0||atkT1Px==0)?(f60_waveDir!=0?f60_waveDir:f60_direction):(atkT1Px>=atkEntryPx?1:-1);
+  }
+
+//==================================================================
+// MASTER PERCEPTION UPDATE — runs the full F60 chain in source order.
 
 //==================================================================
 //= MODULE: V60/Network  (Phase V60.2 — Network engine · MTF FU pools · netBias)
