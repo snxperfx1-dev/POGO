@@ -816,7 +816,7 @@ string currentDisplayPhase = ie1a_currentPhase
 // node-driven phase authority (assigned after the F72 curve-tree engine runs; read
 // here with a 1-bar settle by the region renderer / readout when phaseFromNode is on)
 var string gNodePhase = ""
-string f_phaseLabel() => (phaseFromNode and gNodePhase != "" and gNodePhase != "—") ? gNodePhase : currentDisplayPhase
+f_phaseLabel() => (phaseFromNode and gNodePhase != "" and gNodePhase != "—") ? gNodePhase : currentDisplayPhase
 string displaySub = (str.contains(ie1a_currentPhase, "Liquidity") and liqg_active and liqg_subPhase != "") ? ("State: " + liqg_subPhase + (na(liqg_distPct) ? "" : "   Dist " + str.tostring(math.round(liqg_distPct)) + "%") + "   Arr " + (liqg_objArrival ? "Yes" : (not na(liqg_distPct) and liqg_distPct < 12) ? "Soon" : "No")) : str.contains(ie1a_currentPhase, "Absorption") ? ("Cycle " + str.tostring(entryCycle) + "   Res " + str.tostring(math.round(100.0 - re_residualEnergyScore)) + "%") : ""
 string _cdpDir   = displayWaveDir_M5 == 1 ? "Bullish" : displayWaveDir_M5 == -1 ? "Bearish" : "Neutral"
 string liqg_arrTx = liqg_objArrival ? "Yes" : (not na(liqg_distPct) and liqg_distPct < 12) ? "Imminent" : "No"
