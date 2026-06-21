@@ -1609,9 +1609,15 @@ var int    _supVotes   = 0
 var int    _degVotes   = 0
 var array<float> _seqRetr = array.new<float>()
 var array<float> _lifeSeq = array.new<float>()
+var array<int>   _cseq    = array.new<int>()   // per-TF curve sequence (C1→C2→C3 …): owner dir at each flip
 var float  _wholeChainLife = 50.0
 if _ownDirT != _narrDir
     _narrDir    := _ownDirT
+    // per-TF curve history — each owner-direction flip starts a NEW curve on this TF
+    if _ownDirT != 0
+        array.push(_cseq, _ownDirT)
+        if array.size(_cseq) > 5
+            array.shift(_cseq)
     _legX       := _ownDirT == 1 ? high : _ownDirT == -1 ? low : na
     _legPBdepth := 0.0
     _narrative  := 50.0
@@ -1929,7 +1935,6 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 0, 17, "▌ SENZO", text_color = #a5b4fc, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 17, _szMarket + " · " + _szRegime, text_color = #c7d2fe, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 18, senzoVoice, text_color = #e8edff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 18, "", text_size = size.small)
     table.cell(copilot, 0, 19, "▮ ENERGY", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 19, _szEnergy + "  ·  " + str.tostring(math.round(_szComp)) + "% resolved", text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 20, "▮ THREAT BOARD", text_color = #060a12, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(_szRiskCol, 35))
@@ -1941,7 +1946,6 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 0, 23, f_wrap(_vClose, 26), text_color = #060a12, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_armCol, 25))
     table.cell(copilot, 1, 23, _armed, text_color = #060a12, text_size = size.normal, bgcolor = color.new(_armCol, 25))
     table.cell(copilot, 0, 24, "◣ " + str.replace_all(matters, "\n", " ") + " ◢", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 24, "", text_size = size.small)
 
 f_drawMatrix(int master, string action, float conflict, float threat) =>
     var table matrix = na
@@ -2407,7 +2411,7 @@ f_dirArrow(int _d) => _d == 1 ? "▲" : _d == -1 ? "▼" : "—"
 var table topT = na
 if barstate.islast and showCurve
     if na(topT)
-        topT := table.new(position.top_center, 6, 15, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
+        topT := table.new(position.top_center, 6, 16, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
     // ── OWNERSHIP MERGE (Principle 9) — does the child curve respect the parent FU
     //    and collapse back into it (Camp B → Camp A, parent campaign NOT finished),
     //    or did it break the parent (genuine handoff → new campaign)? ─────────────
@@ -2454,11 +2458,9 @@ if barstate.islast and showCurve
     table.cell(topT, 0, 7, "Cross-TF story", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 1, 7, mtfStory, text_color = mtfAlignN >= 4 ? #34d399 : mtfAlignN <= 2 ? #fb7185 : #fbbf24, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 2, 7, "aligned " + str.tostring(mtfAlignN) + "/6", text_color = #e2e8f0, text_size = size.small)
-    table.cell(topT, 3, 7, "", text_size = size.small)
     table.cell(topT, 0, 8, "Ownership", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 1, 8, _ownStateTx, text_color = _ownStateCol, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 2, 8, "owns: " + mtfOwnerL, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 8, "", text_size = size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CURVE TREE readout (own islast block) — the event-generated recursion
@@ -2480,11 +2482,12 @@ if barstate.islast and showCurve
     // ── WHERE the owning curve lives — origin (birth) → current extreme price ──
     table.cell(topT, 4, 4, "Curve  origin → extreme → now", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 5, 4, _ownLoc + (na(_retrFromX) ? "" : "   ↩ " + str.tostring(math.round(_retrFromX)) + "% off X"), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    // ── F72 step 1: phases EMERGE from the curve (read the node) vs the legacy machine ──
-    table.cell(topT, 4, 5, "Phase ← curve (emergent)", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 5, _ownState, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 4, 6, "Phase ← machine (legacy)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 6, ie1a_currentPhase + (_phaseAgree ? "  ✓" : "  ≠"), text_color = _phaseAgree ? #34d399 : #fbbf24, text_size = size.small, text_halign = text.align_left)
+    // ── PHASE SOURCE FLIPPED — the emergent NODE state is now the authority (the
+    //    label the curve drives); the legacy machine phase is shown only as a cross-ref.
+    table.cell(topT, 4, 5, "● PHASE (LIVE · node)", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(topT, 5, 5, _ownState + (_phaseAgree ? "  ✓ machine" : "  ≠ machine"), text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(topT, 4, 6, "Phase · machine (ref)", text_color = #64748b, text_size = size.small, text_halign = text.align_left)
+    table.cell(topT, 5, 6, ie1a_currentPhase, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     // ── F72 Principle 10 — compression persistence: can the counter side build? ──
     table.cell(topT, 4, 7, "Force (compression persist)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 5, 7, _cpState + "  " + str.tostring(math.round(_cpForce)) + "  " + _cpTrend, text_color = _cpState == "PERSISTING" ? #34d399 : _cpState == "LEAKING" ? #fb7185 : #fbbf24, text_size = size.small)
@@ -2511,6 +2514,14 @@ if barstate.islast and showCurve
     // ── separate IMMEDIATE viability from the looming PARENT (HTF) threat ──
     table.cell(topT, 4, 14, "→ " + _wl6 + " parent threat", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 5, 14, _htfThreat + (na(_htfRoomAtr) ? "" : " · " + str.tostring(math.round(_htfRoomAtr * 10) / 10) + " ATR") + (na(_parentThreat) ? "" : " · " + str.tostring(math.round_to_mintick(_parentThreat))), text_color = na(_htfRoomAtr) ? #94a3b8 : _htfRoomAtr > 3.0 ? #34d399 : _htfRoomAtr > 1.0 ? #fbbf24 : #fb7185, text_size = size.small, text_halign = text.align_left)
+    // ── PER-TF CURVE SEQUENCE — the history of curves born on this TF (C1→C2→C3…),
+    //    each one an owner-direction flip; shows how the timeframe keeps recurring. ──
+    string _cseqTx = ""
+    if array.size(_cseq) > 0
+        for _ci = 0 to array.size(_cseq) - 1
+            _cseqTx := _cseqTx + "C" + str.tostring(_ci + 1) + (array.get(_cseq, _ci) == 1 ? "▲" : "▼") + (_ci < array.size(_cseq) - 1 ? " → " : "")
+    table.cell(topT, 4, 15, "Curve sequence (this TF)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(topT, 5, 15, _cseqTx == "" ? "forming…" : _cseqTx, text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
 
 // ── F72 — plot the CURVE TREE on the chart: each live curve as origin→extreme,
 //    coloured by direction, dashed when recursive (depth>0), tagged with its
