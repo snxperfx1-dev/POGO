@@ -31,6 +31,7 @@
 #include "Include/Execution.mqh"
 #include "Include/Session.mqh"
 #include "Include/News.mqh"
+#include "Include/Curve/Curve.mqh"
 
 //================== INPUTS ==========================================
 input group "═══ Mode (Layer: Human Override Philosophy) ═══"
@@ -55,12 +56,24 @@ input ENUM_OMEGA_LOG_LEVEL InpLogLevel        = LOG_INFO;              // Log ve
 input group "═══ Engine ═══"
 input int                 InpHeartbeatSec     = 5;                    // Heartbeat / persistence cadence (s)
 
+input group "═══ Curve physics (Phase 2) ═══"
+input int                 InpAtrLen           = 14;                   // ATR length
+input int                 InpEffLen           = 10;                   // Efficiency lookback
+input double              InpEffThresh        = 0.65;                 // Efficiency threshold
+input double              InpDispThresh       = 1.5;                  // Displacement threshold (ATR)
+input double              InpConvMult         = 0.01;                 // Convexity multiplier (ATR)
+input int                 InpPivotLen         = 5;                    // Pivot length
+input int                 InpStructLen        = 10;                   // Structure pivot length
+input double              InpImpulseMult      = 1.5;                  // Impulse ATR multiple
+input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
+
 //================== GLOBALS =========================================
 OmegaState     g_state;
 OmegaCapital   g_capital;
 OmegaRisk      g_risk;
 CampaignDB     g_db;
 OmegaExecution g_exec;
+OmegaCurve     g_curve;        // Phase 2: multi-TF perception
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 
@@ -93,11 +106,20 @@ int OnInit()
 //--- 6. Execution shell
    g_exec.Init(InpMode, InpMagic, GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
 
-//--- 7. Heartbeat
+//--- 7. Perception (Phase 2): multi-TF curve engine.
+   if(!g_curve.Init(_Symbol, (ENUM_TIMEFRAMES)_Period,
+                     InpPivotLen, InpStructLen, InpImpulseMult, InpChochBufATR,
+                     InpAtrLen, InpEffLen, InpEffThresh, InpDispThresh, InpConvMult))
+     {
+      OmegaLogger::LogException("EA", -1, "Curve init failed — perception offline.");
+     }
+
+//--- 8. Heartbeat
    EventSetTimer(MathMax(1, InpHeartbeatSec));
 
    OmegaLogger::LogInfo("EA",
-      "Phase 1 skeleton initialized · perception layers (Curve / Force / Chain / Narrative) deferred to Phase 2+.");
+      "Phase 2 perception online · waiting for chart-TF curve readiness (≈" +
+      IntegerToString(InpStructLen) + " bars)");
    return INIT_SUCCEEDED;
   }
 
@@ -107,6 +129,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   g_curve.Deinit();
    OmegaLogger::LogInfo("EA",
       StringFormat("Shutting down · reason=%d · ticks=%I64d", reason, g_tickCount));
    OmegaLogger::Flush();
@@ -127,9 +150,15 @@ void OnTick()
 //    on the account during testing.
    g_capital.Update();
 
-//--- Phase 1: trinity stays neutral (primed=false). Once Phase 2+
-//    populates supporting fields, set g_state.primed = true and
-//    DeriveTrinity() folds them up automatically.
+//--- Phase 2: drive the multi-TF curve engine. Each CurveState
+//    consumes its own bar-close events and updates per-TF
+//    structure / physics. The curve writes the supporting fields,
+//    DeriveTrinity() folds them upward.
+   if(g_curve.Update())
+     {
+      g_curve.DeriveSupporting(g_state.supporting);
+      g_state.primed = g_curve.primed;
+     }
    g_state.DeriveTrinity();
   }
 
@@ -144,7 +173,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s]",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -153,15 +182,19 @@ void OnTimer()
          g_capital.Throttle(),
          OmegaStr::SessionToString(OmegaSession::Current()),
          OmegaNews::Environment(),
-         g_state.Snapshot()));
+         g_state.Snapshot(),
+         g_curve.Snapshot()));
 
-      //--- Phase 1: emit a single OBSERVE / PHASE_NOT_BUILT decision per
-      //    heartbeat to demonstrate the explainability path. Once Phase 2+
-      //    wires the engine, this is replaced by per-tick decisions
-      //    emerging from the trinity.
-      g_exec.HandleDecision(_Symbol, OMEGA_DEC_OBSERVE, REASON_PHASE_NOT_BUILT,
+      //--- Phase 2: emit a HEARTBEAT decision so the explainability path
+      //    keeps logging trinity + curve snapshot every interval. Once
+      //    Phase 4 wires Narrative + LifeScore, real ENTER/HOLD/EXIT
+      //    decisions emerge per tick from the trinity.
+      ENUM_OMEGA_REASON reason = g_state.primed ? REASON_HEARTBEAT : REASON_PHASE_NOT_BUILT;
+      g_exec.HandleDecision(_Symbol, OMEGA_DEC_OBSERVE, reason,
                              g_state, 0,
-                             "Skeleton heartbeat — perception layers not built yet");
+                             g_curve.primed
+                              ? "Curve primed — narrative / chain pending Phase 3-4"
+                              : "Curve warming up — waiting for chart-TF readiness");
 
       OmegaLogger::Flush();
      }

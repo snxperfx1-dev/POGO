@@ -39,7 +39,7 @@ This repo delivers the engine in compile-clean, runnable phases. Each phase plug
 | Phase | Status | Modules | What you can do |
 |---|---|---|---|
 | **1 · Skeleton** | ✅ shipped | `EA · Common · Logger · Memory · CampaignDB · Capital · Risk · PaperTrade · Execution · Session · News` | Attach in OBSERVER mode, watch heartbeat + capital + trinity neutrality logged every N seconds |
-| **2 · Curve physics** | planned | `Curve · CurveState · Compression · Convexity · Force` | Per-TF f_se / f_phys port, primes the supporting fields |
+| **2 · Curve physics** | ✅ shipped | `Curve/CurvePhysics · CurveState · Compression · Convexity · Force · Curve` | Per-TF f_se / f_phys port across M1/M3/M5/M15/H1/H4. The Trinity becomes primed once the chart-TF curve is ready: LifeScore receives Force; supporting fields receive Compression, Convexity, MTF Alignment. |
 | **3 · Curve tree** | planned | `CurveNode · Ownership · Transfer · Merge · ChainHealth` | Recursive tree, ownership-by-energy, chain vitality |
 | **4 · Narrative** | planned | `Story · LifeScore · NarrativeScore · Alignment · Confidence` | Trinity becomes primed; `LifeScore` and `StoryStability` go live |
 | **5 · Campaign positions** | planned | `Execution+ · PositionHealth · CampaignPositions` | Origin / Entry / Progression / Terminal positions, pyramiding, hedge transfer |
@@ -65,7 +65,15 @@ MT5/F72_Omega/
 │  ├─ PaperTrade.mqh            — order shell · live in AUTONOMOUS only
 │  ├─ Execution.mqh             — decision gate (capital → risk → order)
 │  ├─ Session.mqh               — informational session context
-│  └─ News.mqh                  — informational news hooks (Phase 7 wires feed)
+│  ├─ News.mqh                  — informational news hooks (Phase 7 wires feed)
+│  └─ Curve/                    — perception (Phase 2)
+│     ├─ CurvePhysics.mqh       — vel/acc/conv/csm/eff/disp + impulse/decay flags
+│     ├─ CurveState.mqh         — full f_se port: pivots, BOS/CHoCH, spawn engine,
+│     │                          flip zone, point4, cycle extremes, inducement
+│     ├─ Compression.mqh        — compression index + tightening tracker
+│     ├─ Convexity.mqh          — convexity score / shift sign / maturity
+│     ├─ Force.mqh              — composite force (compression persistence)
+│     └─ Curve.mqh              — multi-TF orchestrator + supporting writer
 └─ README.md                    — this file
 ```
 
@@ -168,6 +176,17 @@ MQL5/Files/F72_Omega/
 
 ═══ Engine ═══
   InpHeartbeatSec     — 5
+
+═══ Curve physics (Phase 2) ═══
+  InpAtrLen           — 14    ATR length
+  InpEffLen           — 10    Efficiency lookback
+  InpEffThresh        — 0.65  Efficiency threshold
+  InpDispThresh       — 1.5   Displacement threshold (ATR)
+  InpConvMult         — 0.01  Convexity multiplier (ATR)
+  InpPivotLen         — 5     Pivot length
+  InpStructLen        — 10    Structure pivot length
+  InpImpulseMult      — 1.5   Impulse ATR multiple
+  InpChochBufATR      — 0.75  CHoCH buffer (ATR)
 ```
 
 ---
@@ -187,12 +206,13 @@ MQL5/Files/F72_Omega/
 
 - [ ] EA compiles with 0 errors, 0 warnings
 - [ ] In OBSERVER mode the *Experts* tab shows `[INFO][EA] F72 OMEGA 1.0.0-phase1 ...` once on init
-- [ ] Heartbeat lines appear every `InpHeartbeatSec` seconds with `cap=HEALTHY` + trinity snapshot
-- [ ] `MQL5/Files/F72_Omega/logs/decision_log.csv` is populated with rows tagged `OBSERVE,PHASE_NOT_BUILT`
+- [ ] Heartbeat lines appear every `InpHeartbeatSec` seconds with `cap=HEALTHY` + trinity snapshot + `curve[...]` snapshot
+- [ ] After ~10 closed bars on the chart timeframe, heartbeat shows `primed=YES` and reason becomes `HEARTBEAT` (not `PHASE_NOT_BUILT`)
+- [ ] `MQL5/Files/F72_Omega/logs/decision_log.csv` is populated
 - [ ] No orders are placed
 - [ ] `GlobalVariable` `F72_OMEGA_NEXT_CAMPAIGN_ID` exists with value `1`
 
-If all six are green, Phase 1 is verified and we're ready for Phase 2 (perception layers).
+If all seven are green, Phase 2 is verified and we're ready for Phase 3 (curve tree).
 
 ---
 
