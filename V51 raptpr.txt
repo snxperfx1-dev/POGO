@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v55", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v56", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -38,6 +38,7 @@ bool   showCurve   = input.bool(true, "Show Curve object — energy state (F72 f
 bool   showTree    = input.bool(true, "Plot CURVE TREE on chart (live curves · origin→extreme · emergent phase)", group = GRP)
 string curveCtx    = input.string("Chart wave", "Curve TREE root anchor", options = ["Chart wave", "Higher TF", "Highest TF"], tooltip = "Which curve the tree tracks. 'Chart wave' = the chart timeframe's own curve (recommended — the MTF map already shows higher-timeframe context). 'Higher/Highest TF' climb the timeframe ladder. The panel header shows the actual resolved timeframe.", group = GRP)
 bool   phaseFromNode = input.bool(false, "Phase label driven by curve NODE (emergent) — off = legacy machine", group = GRP, tooltip = "OFF (default): the on-chart phase regions + readout follow the legacy Engine-1A machine phase (the original, more accurate labels). ON: they follow the curve tree's emergent node.state (1-bar settle, debounced) — experimental.")
+bool   showFlipFU  = input.bool(true, "Mark FU candles + Flip Zone on chart", group = GRP)
 int    minConf     = input.int  (55,  "Min confidence to ATTACK",     group = GRP, minval = 0, maxval = 100)
 int    pivLen      = input.int  (8,   "Wave pivot length",            group = GRP, minval = 2, maxval = 50)
 bool   showRegions = input.bool (true, "Show phase REGION labels",    group = GRP)
@@ -153,6 +154,22 @@ f_fuPool(simple float _wf, simple int _lb) =>
 [h1Tip, h1Mid, h1Dir, h1V, h1Sc]  = request.security(syminfo.tickerid, f_safeTF("60"),  f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
 [m15Tip,m15Mid,m15Dir,m15V,m15Sc] = request.security(syminfo.tickerid, f_safeTF("15"),  f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
 [m5Tip, m5Mid, m5Dir, m5V, m5Sc]  = request.security(syminfo.tickerid, f_safeTF("5"),   f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
+
+// ── ON-CHART FU SPIKE MARKS — same trigger as the node engine's f_fuPool: a
+//    dominant rejection wick at a local extreme (swept or not), on the chart TF.
+//    Marked with a triangle + "FU" and the candle tinted so they're easy to spot.
+float _cfuRng = math.max(high - low, 1e-10)
+float _cfuUW  = (high - math.max(open, close)) / _cfuRng
+float _cfuLW  = (math.min(open, close) - low)  / _cfuRng
+float _cfuPHi = ta.highest(high, lookback)[1]
+float _cfuPLo = ta.lowest(low,  lookback)[1]
+bool  _cfuTop = high >= ta.highest(high, lookback)
+bool  _cfuBot = low  <= ta.lowest(low,  lookback)
+bool  cfuBear = _cfuUW >= wickFrac and ((not na(_cfuPHi) and high >= _cfuPHi and close < _cfuPHi) or (_cfuTop and close < open))
+bool  cfuBull = _cfuLW >= wickFrac and ((not na(_cfuPLo) and low  <= _cfuPLo and close > _cfuPLo) or (_cfuBot and close > open))
+plotshape(showFlipFU and cfuBull, "Bullish FU", style = shape.triangleup,   location = location.belowbar, color = #22d3ee, textcolor = #22d3ee, size = size.tiny, text = "FU")
+plotshape(showFlipFU and cfuBear, "Bearish FU", style = shape.triangledown, location = location.abovebar, color = #f59e0b, textcolor = #f59e0b, size = size.tiny, text = "FU")
+barcolor(showFlipFU ? (cfuBull ? color.new(#22d3ee, 0) : cfuBear ? color.new(#f59e0b, 0) : na) : na)
 
 float _ema50 = ta.ema(close, 50)
 int   netBias = nz(mnV) == 1 ? nz(mnDir) : nz(wV) == 1 ? nz(wDir) : nz(dV) == 1 ? nz(dDir) : nz(h4V) == 1 ? nz(h4Dir) : nz(h1V) == 1 ? nz(h1Dir) : nz(m15V) == 1 ? nz(m15Dir) : nz(m5V) == 1 ? nz(m5Dir) : (close > _ema50 ? 1 : close < _ema50 ? -1 : 0)
@@ -2595,6 +2612,26 @@ if barstate.islast and showTree
             array.push(tree_lbls, label.new(bar_index + 22 + f_slotX(_mig618), _mig618, (_cpState == "PERSISTING" ? "OWNERSHIP MIGRATED · defends 0.5–0.618" : "watch 0.5–0.618") + " · F" + str.tostring(math.round(_cpForce)) + " " + _cpTrend, style = label.style_label_left, color = color.new(_mc, 22), textcolor = #04130c, size = size.small))
     // the hold-vs-flip verdict — far-right, also laned
     array.push(tree_lbls, label.new(bar_index + 42 + f_slotX(close), close, _aliveTx + "  (life " + str.tostring(math.round(_life)) + ")", style = label.style_label_left, color = color.new(_aliveCol, 18), textcolor = #0a0e27, size = size.small))
+
+// ── FLIP ZONE on chart — the chart wave's order-block / flip zone (flipTop..flipBot),
+//    extended right and clearly marked, coloured by wave direction. ──────────────
+var box   flipBox = na
+var label flipLbl = na
+if showFlipFU and barstate.islast and not na(flipTop) and not na(flipBot)
+    float _fzM = (flipTop + flipBot) / 2.0
+    int   _fzL = bar_index - 60
+    int   _fzR = bar_index + 12
+    color _fzC = direction == 1 ? #34d399 : direction == -1 ? #fb7185 : #c084fc
+    if na(flipBox)
+        flipBox := box.new(_fzL, flipTop, _fzR, flipBot, border_color = color.new(_fzC, 25), border_width = 2, bgcolor = color.new(_fzC, 84))
+        flipLbl := label.new(_fzR, _fzM, "FLIP ZONE", style = label.style_label_left, color = color.new(_fzC, 18), textcolor = #0a0e27, size = size.small)
+    else
+        box.set_lefttop(flipBox, _fzL, flipTop)
+        box.set_rightbottom(flipBox, _fzR, flipBot)
+        box.set_border_color(flipBox, color.new(_fzC, 25))
+        box.set_bgcolor(flipBox, color.new(_fzC, 84))
+        label.set_xy(flipLbl, _fzR + f_slotX(_fzM), _fzM)
+        label.set_color(flipLbl, color.new(_fzC, 18))
 
 // ── Alerts (global scope) ─────────────────────────────────────────────────────
 alertcondition(gAction == "ATTACK" and gMaster == 1,  "Senseei ATTACK Long",  "Master Senseei: ATTACK long")
