@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-v60port"
+#define OMEGA_VERSION                "1.0.0-v60sole"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -5751,6 +5751,440 @@ public:
 #endif // __OMEGA_V60_SENZO_MQH__
 
 //==================================================================
+//= MODULE: V60/TIE  (Phase V60.8 — Time Intelligence Engine · 5-cycle stack)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 ENGINE 8.0 — Time Intelligence Engine. Tracks the      |
+//|  five timing cycles (MN / W / D / H4 / H1):                      |
+//|    - cycle bias (up / down / flat)                               |
+//|    - cycle completion %                                          |
+//|    - high-time / low-time taken vs not taken                     |
+//|    - alignment across cycles                                     |
+//|    - conflict (rotation)                                         |
+//|    - sequence (which cycle is currently developing)              |
+//|                                                                  |
+//|  Senseei consumes timeAlign + timeConflict from this module      |
+//|  (replacing the previous regime-proxy approximation).            |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_TIE_MQH__
+#define __OMEGA_V60_TIE_MQH__
+
+class OmegaTIE
+  {
+public:
+   // Per-cycle state (MN / W / D / H4 / H1)
+   double mnO, mnH, mnL;  bool mnHt, mnLt;  // mnHt = MN high taken
+   double wO,  wH,  wL;   bool wHt,  wLt;
+   double dO,  dH,  dL;   bool dHt,  dLt;
+   double h4O, h4H, h4L;  bool h4Ht, h4Lt;
+   double h1O, h1H, h1L;  bool h1Ht, h1Lt;
+
+   int    mnDir, wDir, dDir, h4Dir, h1Dir;     // -1/0/+1 per cycle
+   double mnCompPct, wCompPct, dCompPct, h4CompPct, h1CompPct;  // % through cycle
+
+   double timeAlign;       // 0..100 alignment of cycles (sign-agreement)
+   double timeConflict;    // 0..100 rotation between cycles
+   int    cycleSeqIdx;     // which cycle is currently in early-development phase
+   string sequenceTag;     // "MN early" / "H1 mature" / etc.
+
+                     OmegaTIE() { Reset(); }
+
+   void Reset()
+     {
+      mnO = mnH = mnL = wO = wH = wL = dO = dH = dL = 0.0;
+      h4O = h4H = h4L = h1O = h1H = h1L = 0.0;
+      mnHt = mnLt = wHt = wLt = dHt = dLt = h4Ht = h4Lt = h1Ht = h1Lt = false;
+      mnDir = wDir = dDir = h4Dir = h1Dir = 0;
+      mnCompPct = wCompPct = dCompPct = h4CompPct = h1CompPct = 0.0;
+      timeAlign = 50.0; timeConflict = 0.0;
+      cycleSeqIdx = 0; sequenceTag = "—";
+     }
+
+   //--- Read MTF cycle data for a given timeframe.
+   //    Returns true if data was read successfully.
+   bool ReadCycle(string symbol, ENUM_TIMEFRAMES tf,
+                   double &O, double &H, double &L, bool &Ht, bool &Lt, int &dir)
+     {
+      double o = iOpen (symbol, tf, 0);
+      double h = iHigh (symbol, tf, 0);
+      double l = iLow  (symbol, tf, 0);
+      double pH = iHigh(symbol, tf, 1);
+      double pL = iLow (symbol, tf, 1);
+      double c  = iClose(symbol, tf, 0);
+      if(o <= 0 || h <= 0 || l <= 0) return false;
+      O = o; H = h; L = l;
+      Ht = (h >= pH);
+      Lt = (l <= pL);
+      // direction by close vs open of running cycle
+      dir = c > o ? 1 : c < o ? -1 : 0;
+      return true;
+     }
+
+   //--- Cycle completion % — time elapsed vs full period.
+   double CompletionPct(string symbol, ENUM_TIMEFRAMES tf, int periodSec)
+     {
+      datetime t0 = iTime(symbol, tf, 0);
+      if(t0 == 0 || periodSec <= 0) return 0.0;
+      datetime now = TimeCurrent();
+      double elapsed = (double)(now - t0);
+      return MathMax(0.0, MathMin(100.0, elapsed / (double)periodSec * 100.0));
+     }
+
+   void Update()
+     {
+      string sym = _Symbol;
+      ReadCycle(sym, PERIOD_MN1, mnO, mnH, mnL, mnHt, mnLt, mnDir);
+      ReadCycle(sym, PERIOD_W1,  wO,  wH,  wL,  wHt,  wLt,  wDir);
+      ReadCycle(sym, PERIOD_D1,  dO,  dH,  dL,  dHt,  dLt,  dDir);
+      ReadCycle(sym, PERIOD_H4,  h4O, h4H, h4L, h4Ht, h4Lt, h4Dir);
+      ReadCycle(sym, PERIOD_H1,  h1O, h1H, h1L, h1Ht, h1Lt, h1Dir);
+
+      // Approximate periods in seconds (used for completion %)
+      mnCompPct = CompletionPct(sym, PERIOD_MN1, 30 * 24 * 3600);
+      wCompPct  = CompletionPct(sym, PERIOD_W1,   7 * 24 * 3600);
+      dCompPct  = CompletionPct(sym, PERIOD_D1,       24 * 3600);
+      h4CompPct = CompletionPct(sym, PERIOD_H4,        4 * 3600);
+      h1CompPct = CompletionPct(sym, PERIOD_H1,            3600);
+
+      // Alignment: count of cycles sharing dominant direction
+      int sum = mnDir + wDir + dDir + h4Dir + h1Dir;
+      int dom = sum > 0 ? 1 : sum < 0 ? -1 : 0;
+      int cast = (mnDir != 0 ? 1 : 0) + (wDir != 0 ? 1 : 0) + (dDir != 0 ? 1 : 0) +
+                  (h4Dir != 0 ? 1 : 0) + (h1Dir != 0 ? 1 : 0);
+      int forV = (mnDir == dom && mnDir != 0 ? 1 : 0) + (wDir == dom && wDir != 0 ? 1 : 0) +
+                  (dDir == dom && dDir != 0 ? 1 : 0) + (h4Dir == dom && h4Dir != 0 ? 1 : 0) +
+                  (h1Dir == dom && h1Dir != 0 ? 1 : 0);
+      timeAlign    = cast > 0 ? (double)forV / cast * 100.0 : 50.0;
+      timeConflict = cast > 0 ? (double)(cast - forV) / cast * 100.0 : 0.0;
+
+      // Sequence — earliest-developing cycle by completion %
+      double minComp = 999.0; int idx = 0;
+      if(mnCompPct < minComp) { minComp = mnCompPct; idx = 0; }
+      if(wCompPct  < minComp) { minComp = wCompPct;  idx = 1; }
+      if(dCompPct  < minComp) { minComp = dCompPct;  idx = 2; }
+      if(h4CompPct < minComp) { minComp = h4CompPct; idx = 3; }
+      if(h1CompPct < minComp) { minComp = h1CompPct; idx = 4; }
+      cycleSeqIdx = idx;
+      string names[];  ArrayResize(names, 5);
+      names[0] = "MN"; names[1] = "W"; names[2] = "D"; names[3] = "H4"; names[4] = "H1";
+      string phase = minComp < 25 ? "early" : minComp < 60 ? "developing" : "mature";
+      sequenceTag = names[idx] + " " + phase;
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("MN%d/%.0f%% W%d/%.0f%% D%d/%.0f%% H4%d/%.0f%% H1%d/%.0f%% · align=%.0f conflict=%.0f · seq=%s",
+                           mnDir, mnCompPct, wDir, wCompPct, dDir, dCompPct,
+                           h4Dir, h4CompPct, h1Dir, h1CompPct,
+                           timeAlign, timeConflict, sequenceTag);
+     }
+  };
+
+#endif // __OMEGA_V60_TIE_MQH__
+
+//==================================================================
+//= MODULE: V60/Belief  (Phase V60.9 — probability cloud)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 SECTION 12A — Belief Engine. Five probability scores:  |
+//|    continuationBelief — story keeps going same direction          |
+//|    retracementBelief  — pullback / partial reversal              |
+//|    expansionBelief    — fresh impulse / new range                |
+//|    creationBelief     — new high / new low forming               |
+//|    absorptionBelief   — flat / two-sided / time-based             |
+//|                                                                  |
+//|  Together they form the probability cloud the strategy rotates    |
+//|  attention around. Each derives from current state — no manual    |
+//|  thresholds.                                                      |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_BELIEF_MQH__
+#define __OMEGA_V60_BELIEF_MQH__
+
+class OmegaBelief
+  {
+public:
+   double continuationBelief;
+   double retracementBelief;
+   double expansionBelief;
+   double creationBelief;
+   double absorptionBelief;
+   string dominant;            // name of the highest-belief outcome
+
+                     OmegaBelief() { Reset(); }
+
+   void Reset()
+     {
+      continuationBelief = retracementBelief = expansionBelief = 0.0;
+      creationBelief = absorptionBelief = 0.0;
+      dominant = "—";
+     }
+
+   void Update(const OmegaSenseei &sn, const OmegaEnergy &energy,
+                const OmegaEngine1A &engine1A, OmegaCurve &curve,
+                double life, double waveProgress)
+     {
+      string ph = engine1A.currentPhase;
+      bool isExpansion  = StringFind(ph, "Expansion") >= 0
+                          && StringFind(ph, "Pre-Convexity") < 0
+                          && StringFind(ph, "Induction") < 0;
+      bool isPreConv    = StringFind(ph, "Pre-Convexity") >= 0;
+      bool isInduction  = StringFind(ph, "Induction") >= 0 || StringFind(ph, "Liquidity") >= 0;
+      bool isAbsorption = StringFind(ph, "Absorption") >= 0;
+      bool isClimax     = StringFind(ph, "New High") >= 0 || StringFind(ph, "New Low") >= 0
+                          || StringFind(ph, "Climax") >= 0;
+      bool isOrigin     = StringFind(ph, "Point 4") >= 0;
+
+      // Continuation — the curve is alive, force persisting, story coherent
+      continuationBelief = 0.0;
+      if(life >= 60.0)                                continuationBelief += 30.0;
+      if(sn.alignment >= 65.0)                         continuationBelief += 20.0;
+      if(energy.resCode == 0)                          continuationBelief += 15.0;
+      if(isExpansion || isPreConv)                     continuationBelief += 15.0;
+      if(sn.opportunity == "STRONG" ||
+         sn.opportunity == "EXCEPTIONAL")              continuationBelief += 20.0;
+      continuationBelief = MathMax(0.0, MathMin(100.0, continuationBelief));
+
+      // Retracement — pullback risk; force leaking, life weakening, deep retrace
+      retracementBelief = 0.0;
+      if(life < 60.0 && life > 32.0)                  retracementBelief += 25.0;
+      if(energy.resCode == 1)                          retracementBelief += 20.0;
+      if(isInduction)                                  retracementBelief += 15.0;
+      if(sn.conflict > 40.0)                           retracementBelief += 15.0;
+      double resPct = energy.residualEnergyScore;
+      if(resPct < 50.0)                                retracementBelief += 15.0;
+      retracementBelief = MathMax(0.0, MathMin(100.0, retracementBelief));
+
+      // Expansion — fresh impulse / new range
+      expansionBelief = 0.0;
+      if(isExpansion)                                  expansionBelief += 30.0;
+      if(life >= 60.0 && energy.resCode == 0)          expansionBelief += 25.0;
+      if(waveProgress < 35.0)                          expansionBelief += 20.0;
+      if(sn.timing == "EARLY" || sn.timing == "VERY EARLY") expansionBelief += 15.0;
+      expansionBelief = MathMax(0.0, MathMin(100.0, expansionBelief));
+
+      // Creation — new high / new low forming
+      creationBelief = 0.0;
+      if(isClimax)                                     creationBelief += 35.0;
+      if(waveProgress >= 75.0 && waveProgress < 96.0)  creationBelief += 25.0;
+      if(life >= 60.0)                                 creationBelief += 15.0;
+      if(sn.timing == "LATE")                          creationBelief += 15.0;
+      creationBelief = MathMax(0.0, MathMin(100.0, creationBelief));
+
+      // Absorption — flat / two-sided / mature without expansion
+      absorptionBelief = 0.0;
+      if(isAbsorption)                                 absorptionBelief += 35.0;
+      if(life < 32.0)                                  absorptionBelief += 20.0;
+      if(sn.conflict > 60.0)                           absorptionBelief += 15.0;
+      if(waveProgress >= 96.0)                         absorptionBelief += 15.0;
+      if(energy.resCode == 2)                          absorptionBelief += 15.0;
+      absorptionBelief = MathMax(0.0, MathMin(100.0, absorptionBelief));
+
+      // Dominant
+      double mx = continuationBelief; dominant = "Continuation";
+      if(retracementBelief  > mx) { mx = retracementBelief;  dominant = "Retracement"; }
+      if(expansionBelief    > mx) { mx = expansionBelief;    dominant = "Expansion"; }
+      if(creationBelief     > mx) { mx = creationBelief;     dominant = "Creation"; }
+      if(absorptionBelief   > mx) { mx = absorptionBelief;   dominant = "Absorption"; }
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("cont=%.0f retr=%.0f exp=%.0f new=%.0f abs=%.0f · dom=%s",
+                           continuationBelief, retracementBelief, expansionBelief,
+                           creationBelief, absorptionBelief, dominant);
+     }
+  };
+
+#endif // __OMEGA_V60_BELIEF_MQH__
+
+//==================================================================
+//= MODULE: V60/Liquidity  (Phase V60.10 — liquidity heatmap · sweep detector)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 SECTION 10 — liquidity heatmap. Tracks recent swing    |
+//|  highs/lows, marks them as 'liquid', detects when a sweep        |
+//|  happens (price pierces and rejects), and exposes:               |
+//|    liqHeat     0..100 — accumulated unsweeped levels nearby      |
+//|    liqSweepOK  bool   — fresh sweep within last N bars           |
+//|    liqSweepDir int    — which side just got swept                |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_LIQUIDITY_MQH__
+#define __OMEGA_V60_LIQUIDITY_MQH__
+
+#define OMEGA_LIQ_RING 32
+
+class OmegaLiquidity
+  {
+private:
+   double m_swingHighs[OMEGA_LIQ_RING];
+   double m_swingLows[OMEGA_LIQ_RING];
+   int    m_highsHead, m_lowsHead;
+   int    m_highsCount, m_lowsCount;
+   datetime m_lastSweepTime;
+
+public:
+   double liqHeat;            // 0..100
+   bool   liqSweepOK;          // sweep within last N bars
+   int    liqSweepDir;         // +1 = high swept, -1 = low swept
+   double nearestHigh;          // nearest unsweeped resting high
+   double nearestLow;           // nearest unsweeped resting low
+
+                     OmegaLiquidity() { Reset(); }
+
+   void Reset()
+     {
+      ArrayInitialize(m_swingHighs, 0.0);
+      ArrayInitialize(m_swingLows,  0.0);
+      m_highsHead = m_lowsHead = 0;
+      m_highsCount = m_lowsCount = 0;
+      m_lastSweepTime = 0;
+      liqHeat = 0.0; liqSweepOK = false; liqSweepDir = 0;
+      nearestHigh = nearestLow = 0.0;
+     }
+
+   //--- Push a new swing high/low when a pivot confirms.
+   void PushHigh(double v)
+     {
+      if(v <= 0) return;
+      m_swingHighs[m_highsHead] = v;
+      m_highsHead = (m_highsHead + 1) % OMEGA_LIQ_RING;
+      if(m_highsCount < OMEGA_LIQ_RING) m_highsCount++;
+     }
+
+   void PushLow(double v)
+     {
+      if(v <= 0) return;
+      m_swingLows[m_lowsHead] = v;
+      m_lowsHead = (m_lowsHead + 1) % OMEGA_LIQ_RING;
+      if(m_lowsCount < OMEGA_LIQ_RING) m_lowsCount++;
+     }
+
+   //--- Per-bar update: detect sweeps, refresh heat, find nearest levels.
+   void Update(OmegaCurve &curve)
+     {
+      // Pull pivots from chart-TF curve state.
+      CurveState *chart = curve.ChartTfState();
+      if(chart != NULL)
+        {
+         if(chart.curSH > 0 && (m_highsCount == 0 || m_swingHighs[(m_highsHead + OMEGA_LIQ_RING - 1) % OMEGA_LIQ_RING] != chart.curSH))
+            PushHigh(chart.curSH);
+         if(chart.curSL > 0 && (m_lowsCount == 0 || m_swingLows[(m_lowsHead + OMEGA_LIQ_RING - 1) % OMEGA_LIQ_RING] != chart.curSL))
+            PushLow(chart.curSL);
+        }
+
+      double bid  = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double atr  = (chart != NULL) ? chart.physics.atr : 0.0;
+      if(atr <= 0 && bid > 0) atr = bid * 0.001;
+
+      // Sweep detector: did price exceed any unsweeped high/low within last bar?
+      double curHi = iHigh(_Symbol, _Period, 1);
+      double curLo = iLow(_Symbol, _Period, 1);
+      datetime now = TimeCurrent();
+      bool freshSweep = false; int sweepDir = 0;
+      for(int i = 0; i < m_highsCount; i++)
+        {
+         double sh = m_swingHighs[i];
+         if(sh > 0 && curHi > sh && bid < sh)
+           {
+            freshSweep = true; sweepDir = 1;
+            m_swingHighs[i] = 0.0;  // mark as swept
+            break;
+           }
+        }
+      if(!freshSweep)
+        {
+         for(int i = 0; i < m_lowsCount; i++)
+           {
+            double sl = m_swingLows[i];
+            if(sl > 0 && curLo < sl && bid > sl)
+              {
+               freshSweep = true; sweepDir = -1;
+               m_swingLows[i] = 0.0;
+               break;
+              }
+           }
+        }
+      if(freshSweep)
+        {
+         m_lastSweepTime = now;
+         liqSweepDir = sweepDir;
+        }
+      // sweep-OK if happened within last N bars (~30 minutes on M5)
+      liqSweepOK = (m_lastSweepTime > 0 && (now - m_lastSweepTime) < 1800);
+
+      // Nearest resting levels
+      double nH = 0, nL = 0;
+      double minDistH = 1e10, minDistL = 1e10;
+      for(int i = 0; i < m_highsCount; i++)
+        {
+         double sh = m_swingHighs[i];
+         if(sh > 0 && sh > bid)
+           {
+            double d = sh - bid;
+            if(d < minDistH) { minDistH = d; nH = sh; }
+           }
+        }
+      for(int i = 0; i < m_lowsCount; i++)
+        {
+         double sl = m_swingLows[i];
+         if(sl > 0 && sl < bid)
+           {
+            double d = bid - sl;
+            if(d < minDistL) { minDistL = d; nL = sl; }
+           }
+        }
+      nearestHigh = nH;
+      nearestLow  = nL;
+
+      // liqHeat — count of unsweeped levels within 5×ATR, normalised to 0..100
+      int near = 0; int total = 0;
+      for(int i = 0; i < m_highsCount; i++)
+        {
+         if(m_swingHighs[i] > 0)
+           {
+            total++;
+            if(MathAbs(m_swingHighs[i] - bid) < atr * 5.0) near++;
+           }
+        }
+      for(int i = 0; i < m_lowsCount; i++)
+        {
+         if(m_swingLows[i] > 0)
+           {
+            total++;
+            if(MathAbs(m_swingLows[i] - bid) < atr * 5.0) near++;
+           }
+        }
+      liqHeat = total > 0 ? (double)near / total * 100.0 : 0.0;
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("heat=%.0f sweep=%s dir=%d nH=%.5f nL=%.5f",
+                           liqHeat, liqSweepOK ? "Y" : "N", liqSweepDir,
+                           nearestHigh, nearestLow);
+     }
+  };
+
+#endif // __OMEGA_V60_LIQUIDITY_MQH__
+
+//==================================================================
+//= V60 — file-scope globals (declared early so DecisionEngine /
+//= Chart / CampaignPositions can read them without forward-decl
+//= issues. The Pine V60 perception suite is the SOLE HEART/MIND of
+//= OMEGA — every downstream consumer reads from these.)
+//==================================================================
+OmegaLetra      g_letra;
+OmegaNetwork    g_network;
+OmegaEnergy     g_energy;
+OmegaEngine1A   g_engine1A;
+OmegaLiqg       g_liqg;
+OmegaSenseei    g_senseei;
+OmegaSenzo      g_senzo;
+OmegaTIE        g_tie;
+OmegaBelief     g_belief;
+OmegaLiquidity  g_liquidity;
+
+//==================================================================
 //= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
 //= Source: Include/Chart.mqh
 //==================================================================
@@ -7217,43 +7651,58 @@ struct DecisionParams
 class DecisionEngine
   {
 public:
-   //--- Phase 5.6 — Continuous conviction (0..100) from all signals.
-   //    Trinity contributes 60% (life 30, stab 15, conf 15). Narrative
-   //    relationship components contribute 40% (ownership / compression
-   //    / force / chain / parent / progression / transfer, equally
-   //    weighted at ~5.7% each = 40% sum). Contradiction subtracts.
-   //    Components are CONTRIBUTORS — none of them can return 0 alone.
+   //--- Phase V60 — V60 SENSEEI is now the SOLE HEART/MIND of OMEGA.
+   //    Conviction is no longer a trinity blend — it IS the Senseei's
+   //    confidence. EV multiplier comes from oppScore (the Pine
+   //    indicator's master opportunity number). Direction comes from
+   //    Senseei's master vote. The user's canonical rule still holds:
+   //    these are CONTRIBUTORS to a continuous score, never component
+   //    vetoes. The Phase 5.6 noise floor is the only soft cutoff.
+   //
+   //    The OmegaState.life/stability/confidence and naComp inputs are
+   //    kept available as auxiliary read-only signals (HUD, log) but
+   //    they no longer DRIVE the decision. V60 owns the decision.
    static double ComputeConviction(const OmegaState &state,
                                     const NarrativeAlignment::Components &naComp)
      {
-      double trinity = state.life       * 0.30
-                     + state.stability  * 0.15
-                     + state.confidence * 0.15;       // 60% weight
-      double rel = (naComp.ownership   + naComp.compression + naComp.force
-                  + naComp.chain       + naComp.parent      + naComp.progression
-                  + naComp.transfer) * (0.40 / 7.0);  // 40% weight, equal sub-weights
+      // Read V60 Senseei output directly. Conviction = senseei.confidence
+      // (already 0..100 from the canonical Pine math). When senseei
+      // hasn't yet computed (very first ticks), fall back to a trinity
+      // proxy so the engine doesn't return zero on init.
+      double v60Conf = g_senseei.confidence;
+      if(v60Conf > 0.0) return v60Conf;
+      // Bootstrap fallback (used only on the first 1-2 ticks before
+      // g_senseei.Update has run for the first time).
+      double trinity = state.life * 0.30 + state.stability * 0.15 + state.confidence * 0.15;
+      double rel = (naComp.ownership + naComp.compression + naComp.force +
+                    naComp.chain + naComp.parent + naComp.progression +
+                    naComp.transfer) * (0.40 / 7.0);
       double conv = trinity + rel - naComp.contradiction;
       return MathMax(0.0, MathMin(100.0, conv));
      }
 
-   //--- Phase 5.6 — EV multiplier from probability cloud.
-   //    Range [0..2]. EV > 1 means continuation favoured; EV < 1 means
-   //    terminal more likely. For owner-direction: pCont positive,
-   //    pTerm negative. For counter-direction: pTrans positive,
-   //    pCont negative. If probability cloud isn't yet primed
-   //    (Phase 6 not active), returns 1.0 (neutral).
+   //--- Phase V60 — EV multiplier comes from V60 oppScore (the Pine
+   //    indicator's primary opportunity number, 0..100). Maps to a
+   //    0..2 multiplier where 50 = neutral (1.0), 100 = exceptional
+   //    (2.0), 0 = no opportunity (0.0). Direction-aware: counter-EV
+   //    inverts the sign because the Senseei master is for the
+   //    dominant side; opposite trades are weaker by definition.
    static double ComputeEV(const OmegaState &state, int candidateDir, int ownerDir)
      {
-      double pCont  = state.supporting.pContinuation;
-      double pTrans = state.supporting.pTransfer;
-      double pTerm  = state.supporting.pTerminal;
-      if(pCont + pTrans + pTerm < 5.0) return 1.0;     // cloud not primed
-      double ev;
-      if(candidateDir == ownerDir)
-         ev = (pCont * 1.0 + pTrans * 0.3 - pTerm * 0.5) / 100.0;
-      else
-         ev = (pTrans * 0.8 + pTerm * 0.5 - pCont * 0.4) / 100.0;
-      return MathMax(0.0, MathMin(2.0, 1.0 + ev));
+      double opp = g_senseei.oppScore;
+      if(opp <= 0.0)
+        {
+         // bootstrap fallback — neutral EV
+         return 1.0;
+        }
+      // 50 = neutral, 100 = exceptional, 0 = no edge
+      double evWith    = MathMax(0.0, MathMin(2.0, opp / 50.0));
+      // For counter-direction trades, invert the relationship — opp
+      // is computed for the master direction; a counter trade is
+      // worse the higher opp is.
+      if(candidateDir != 0 && ownerDir != 0 && candidateDir != ownerDir)
+         return MathMax(0.0, MathMin(2.0, (100.0 - opp) / 50.0));
+      return evWith;
      }
 
    //--- Compute stop distance in POINTS from chart-TF curve state.
@@ -9596,14 +10045,6 @@ int      g_entrySuccesses    = 0;
 int      g_entrySkips        = 0;
 //-- Phases 5.2 / 9 / 10..14 — globals
 OmegaFunded         g_funded;       // Phase 5.2 — FTMO funded mode
-//-- Phases V60.1..V60.7 — Letra/Network/Energy/Engine1A/Liqg/Senseei/Senzo (Pine V60 port)
-OmegaLetra          g_letra;
-OmegaNetwork        g_network;
-OmegaEnergy         g_energy;
-OmegaEngine1A       g_engine1A;
-OmegaLiqg           g_liqg;
-OmegaSenseei        g_senseei;
-OmegaSenzo          g_senzo;
 CampaignArchive     g_archive;      // Phase 9   — campaign memory + similarity
 OmegaExplain        g_explain;      // Phase 14  — decision trace ring
 OmegaAttention      g_attention;    // Phase 10  — focus engine
@@ -9866,11 +10307,18 @@ void OnTick()
       g_engine1A.Update(g_curve);
       g_energy.Update(g_curve, g_state.life);
       g_liqg.Update(g_curve, g_engine1A);
-      //   timeAlign / timeConflict — proxy from Phase 6 meta-regime.
-      double _timeAlign    = MathMax(0.0, MathMin(100.0, 50.0 + g_state.supporting.regime * 0.5));
-      double _timeConflict = MathMax(0.0, MathMin(100.0, 50.0 - g_state.supporting.regime * 0.5));
+      //   Phase V60.8 — Time Intelligence Engine reads the 5-cycle stack
+      //   directly from MTF data (replaces the previous regime proxy).
+      g_tie.Update();
+      //   Phase V60.10 — liquidity heatmap (per-bar swing tracking + sweep detector).
+      g_liquidity.Update(g_curve);
+      //   senseei now consumes REAL timeAlign / timeConflict from TIE.
       g_senseei.Update(g_letra, g_network, g_energy, g_engine1A, g_liqg,
-                        _timeAlign, _timeConflict);
+                        g_tie.timeAlign, g_tie.timeConflict);
+      //   Phase V60.9 — belief cloud built from senseei + state.
+      g_belief.Update(g_senseei, g_energy, g_engine1A, g_curve,
+                       g_state.life, g_letra.waveProgress);
+      //   Senzo composes the trader voice from the full V60 stack.
       g_senzo.Update(g_senseei, g_state, g_curve, g_engine1A, g_liqg,
                       g_letra, g_network, g_energy, g_state.life);
 
