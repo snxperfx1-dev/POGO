@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase14"
+#define OMEGA_VERSION                "1.0.0-phase5.6"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -1409,26 +1409,41 @@ public:
    int    TierMaxBudget(ENUM_OMEGA_TIER t)  const { return m_tierMaxBudget[(int)t]; }
    double TierStopAtrMult(ENUM_OMEGA_TIER t) const { return m_tierStopAtrMult[(int)t]; }
 
-   //--- Phase 5.1.1 — per-tier conviction floor + per-tier risk ceiling.
-   //    Returns 0.0 to skip when state is below tier conviction floor;
-   //    otherwise returns the existing ladder pct, capped at tier ceiling
-   //    AND the global hard ceiling (whichever is lower).
+   //--- Phase 5.6 — CANONICAL F72 RULE: components are CONTRIBUTORS,
+   //    never gates. The only catastrophic vetoes left here are:
+   //    (a) opt-in MICRO tier — the user must explicitly consent to
+   //        broker-min-forced over-risk on tiny accounts, and
+   //    (b) state.primed during cold-start (no perception yet → tiny
+   //        size, never zero unless engine is fully unprimed).
+   //
+   //    Returns a CONTINUOUS conviction-weighted % risk. A weak
+   //    Trinity produces a small size, NOT a refusal. Risk and
+   //    DecisionEngine work together: DecisionEngine emits an action
+   //    + conviction + EV; Risk turns conviction × EV × tier_cap
+   //    into the actual size in % equity.
    double RiskPctFor(const OmegaState &s, ENUM_OMEGA_TIER tier) const
      {
       double cap = MathMin(TierMaxRiskPct(tier), m_hardCeiling);
-      if(!s.primed) return MathMin(m_base, cap);
-      if(tier == TIER_MICRO && !m_allowMicro) return 0.0;
-      if(s.life       < TierMinLife(tier)) return 0.0;
-      if(s.stability  < TierMinStab(tier)) return 0.0;
-      if(s.confidence < TierMinConf(tier)) return 0.0;
-      double pct = m_base;
-      bool aPlus  = (s.life >= 75 && s.stability >= 75 && s.confidence >= 70);
-      bool strong = (s.life >= 60 && s.stability >= 60 && s.confidence >= 55);
-      bool normal = (s.life >= 45 && s.stability >= 45 && s.confidence >= 40);
-      if(aPlus)        pct = m_exceptional;
-      else if(strong)  pct = m_strong;
-      else if(normal)  pct = m_normal;
-      return MathMin(pct, cap);
+      if(tier == TIER_MICRO && !m_allowMicro) return 0.0;       // catastrophic: opt-in
+      if(!s.primed) return cap * 0.10;                          // small fallback during warmup
+      //   Continuous conviction proxy when no explicit conviction is
+      //   passed (DecisionEngine builds the proper one and uses
+      //   RiskPctFromConviction below).
+      double trinity = s.life * 0.30 + s.stability * 0.15 + s.confidence * 0.15;
+      double naFactor = s.supporting.alignment * 0.40;
+      double conv = MathMax(0.0, MathMin(100.0, trinity + naFactor));
+      return cap * (conv / 100.0);
+     }
+
+   //--- Phase 5.6 — explicit conviction-from-DecisionEngine sizing.
+   //    The recommended path. conviction in 0..100, evMult in 0..2,
+   //    tier cap from TierMaxRiskPct. NO component-level vetoes.
+   double RiskPctFromConviction(double conviction, double evMult, ENUM_OMEGA_TIER tier) const
+     {
+      if(tier == TIER_MICRO && !m_allowMicro) return 0.0;       // catastrophic: opt-in
+      double cap = MathMin(TierMaxRiskPct(tier), m_hardCeiling);
+      double pct = cap * (conviction / 100.0) * MathMax(0.1, evMult);
+      return MathMax(0.0, MathMin(cap, pct));
      }
 
    //--- Backwards-compatible legacy entrypoint (no tier).
@@ -5459,34 +5474,31 @@ public:
 
 private:
    //=== HUD =========================================================
+   //  Phase 5.6 — CANONICAL F72 RULE: "Components are CONTRIBUTORS,
+   //  never gates." This HUD shows every signal as a continuous value
+   //  with a horizontal bar — NOT pass/fail. The only red bar at
+   //  the bottom is for actual catastrophic vetoes (margin / capital
+   //  state / funded trip / portfolio cap), and even those merely
+   //  read "PAUSED" — never "BLOCKED" by a component score.
+   //
+   //  The trinity floors that USED to gate (life/stab/conf per tier)
+   //  are kept as informational reference levels only. The narrative
+   //  alignment threshold likewise — informational only.
+   //
    void UpdateHUD(const OmegaState &s, OmegaCurve &curve, OmegaStory &story,
                   ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
                   ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
      {
-      int rows = 18;
+      int rows = 19;
       int W = m_hudWidth;
       int H = m_lineHeight * rows + 14;
       int X = m_hudX;
       int Y = m_hudY;
-      // background frame
       EnsureRectLabel(N("HUD_BG"), m_hudCorner, X, Y, W, H, m_bg, m_dim);
 
       int row = 0;
       int rx = X + 8;
       int ry = Y + 8;
-
-      // Per-tier conviction floors
-      double minLife = risk.TierMinLife(tier);
-      double minStab = risk.TierMinStab(tier);
-      double minConf = risk.TierMinConf(tier);
-
-      bool lifeOK = (s.life       >= minLife);
-      bool stabOK = (s.stability  >= minStab);
-      bool confOK = (s.confidence >= minConf);
-
-      // Phase 5.5.3 — narrative-coherence gate (canonical)
-      double naScore  = s.supporting.alignment;       // 0..100 (Story has overwritten)
-      bool   naOK     = (naScore >= m_narrAlignMin);
 
       // Title
       EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
@@ -5504,50 +5516,48 @@ private:
                    tierLine, tcol);
       row++;
 
-      // Trinity bars — each shows value, gauge, tier floor, pass/fail mark
-      string lifeStr = StringFormat("life  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.life), s.life, minLife,
-                                     lifeOK ? "OK" : "X");
-      string stabStr = StringFormat("stab  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.stability), s.stability, minStab,
-                                     stabOK ? "OK" : "X");
-      string confStr = StringFormat("conf  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.confidence), s.confidence, minConf,
-                                     confOK ? "OK" : "X");
+      // Trinity bars — INFO display only. Color tinted by value but
+      // NO "X" / "OK" gate marks. Components contribute, they don't gate.
+      string lifeStr = StringFormat("life  %s %5.1f", GaugeBar(s.life), s.life);
+      string stabStr = StringFormat("stab  %s %5.1f", GaugeBar(s.stability), s.stability);
+      string confStr = StringFormat("conf  %s %5.1f", GaugeBar(s.confidence), s.confidence);
       EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   lifeStr, lifeOK ? m_bull : m_bear);
+                   lifeStr, s.life >= 60 ? m_bull : s.life >= 35 ? m_warn : m_bear);
       row++;
       EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   stabStr, stabOK ? m_bull : m_bear);
+                   stabStr, s.stability >= 60 ? m_bull : s.stability >= 35 ? m_warn : m_bear);
       row++;
       EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   confStr, confOK ? m_bull : m_bear);
+                   confStr, s.confidence >= 55 ? m_bull : s.confidence >= 30 ? m_warn : m_bear);
       row++;
 
-      // Narrative Alignment — the canonical relationship-coherence gate.
-      string naLine = StringFormat("Narrative Align %s %5.1f  >=%.0f  %s",
-                                    GaugeBar(naScore), naScore, m_narrAlignMin,
-                                    naOK ? "OK" : "X");
+      // Narrative components — pure display, no gates. Each row is a
+      // contributor with its own bar. Shown as a single block.
+      double naScore = s.supporting.alignment;
+      string naLine = StringFormat("Narrative      %s %5.1f", GaugeBar(naScore), naScore);
       EnsureLabel(N("HUD_NA"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   naLine, naOK ? m_bull : m_bear);
+                   naLine, naScore >= 60 ? m_bull : naScore >= 35 ? m_warn : m_bear);
+      row++;
+      WriteValueLine(N("HUD_C_OWN"), rx, ry, row, "  Ownership      ", story.naComp.ownership);    row++;
+      WriteValueLine(N("HUD_C_CMP"), rx, ry, row, "  Compression    ", story.naComp.compression);  row++;
+      WriteValueLine(N("HUD_C_FRC"), rx, ry, row, "  Force          ", story.naComp.force);        row++;
+      WriteValueLine(N("HUD_C_CHN"), rx, ry, row, "  Chain Vitality ", story.naComp.chain);        row++;
+      WriteValueLine(N("HUD_C_PAR"), rx, ry, row, "  Parent Health  ", story.naComp.parent);       row++;
+      WriteValueLine(N("HUD_C_PRG"), rx, ry, row, "  Progression    ", story.naComp.progression);  row++;
+      WriteValueLine(N("HUD_C_XFR"), rx, ry, row, "  Transfer Risk  ", story.naComp.transfer);     row++;
+      string ctxt = StringFormat("  Contradiction  %5.1f", story.naComp.contradiction);
+      EnsureLabel(N("HUD_C_CON"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   ctxt, story.naComp.contradiction <= 20.0 ? m_bull :
+                          story.naComp.contradiction <= 40.0 ? m_warn : m_bear);
       row++;
 
-      // Narrative components (each ✓ if >=50, × if below)
-      // The HUD shows the relationships behind the score so the trader
-      // can see WHICH relationship is dragging coherence.
-      WriteComponent(N("HUD_C_OWN"), rx, ry, row, "  Ownership      ", story.naComp.ownership);    row++;
-      WriteComponent(N("HUD_C_CMP"), rx, ry, row, "  Compression    ", story.naComp.compression);  row++;
-      WriteComponent(N("HUD_C_FRC"), rx, ry, row, "  Force          ", story.naComp.force);        row++;
-      WriteComponent(N("HUD_C_CHN"), rx, ry, row, "  Chain Vitality ", story.naComp.chain);        row++;
-      WriteComponent(N("HUD_C_PAR"), rx, ry, row, "  Parent Health  ", story.naComp.parent);       row++;
-      WriteComponent(N("HUD_C_PRG"), rx, ry, row, "  Progression    ", story.naComp.progression);  row++;
-      WriteComponent(N("HUD_C_XFR"), rx, ry, row, "  Transfer Risk  ", story.naComp.transfer);     row++;
-      // contradiction inverted — × if HIGH (>20), ✓ if LOW
-      string ctxt = StringFormat("  Contradiction  %5.1f  %s",
-                                  story.naComp.contradiction,
-                                  story.naComp.contradiction <= 20.0 ? "OK" : "X");
-      EnsureLabel(N("HUD_C_CON"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   ctxt, story.naComp.contradiction <= 20.0 ? m_bull : m_bear);
+      // Probability cloud — the EV input
+      string probLine = StringFormat("p(cont/term/trans) %3.0f / %3.0f / %3.0f",
+                                      s.supporting.pContinuation,
+                                      s.supporting.pTerminal,
+                                      s.supporting.pTransfer);
+      EnsureLabel(N("HUD_PROB"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   probLine, m_dim);
       row++;
 
       // Owner curve
@@ -5562,7 +5572,7 @@ private:
                    ownLine, DirColor(oDir));
       row++;
 
-      // Verdict (last decision)
+      // Verdict (last decision) + reason
       string verdict = OmegaStr::DecisionToString(lastDec);
       color vcol = (lastDec == OMEGA_DEC_ENTER_LONG || lastDec == OMEGA_DEC_ENTER_SHORT
                      || lastDec == OMEGA_DEC_ADD || lastDec == OMEGA_DEC_REVERSE) ? m_bull
@@ -5573,38 +5583,37 @@ private:
                    vline, vcol);
       row++;
 
-      // Story label (canonical narrative coherence)
+      // Story label
       string storyLine = "story  " + story.crossTfStory;
       EnsureLabel(N("HUD_STORY"), m_hudCorner, rx, ry + row * m_lineHeight,
                    storyLine, m_dim);
       row++;
 
-      // GATE line — explicit summary. Real gates only:
-      //   1. owner present
-      //   2. Trinity floors (life/stab/conf per tier)
-      //   3. Narrative alignment >= threshold (relationship coherence)
-      // NEVER timeframe count.
-      string gate = "";
-      bool   ownerOK = (curve.tree.ownerIndex >= 0 && oDir != 0);
-      if(!s.primed)         gate = "WARMUP — perception not primed yet";
-      else
-        {
-         string blockers = "";
-         if(!ownerOK) blockers += "no owning curve  ";
-         if(!lifeOK)  blockers += StringFormat("life %.0f<%.0f  ", s.life,       minLife);
-         if(!stabOK)  blockers += StringFormat("stab %.0f<%.0f  ", s.stability,  minStab);
-         if(!confOK)  blockers += StringFormat("conf %.0f<%.0f  ", s.confidence, minConf);
-         if(!naOK)    blockers += StringFormat("narr-align %.0f<%.0f  ", naScore, m_narrAlignMin);
-         if(StringLen(blockers) == 0) gate = "GATES OPEN — entry eligible";
-         else                          gate = "BLOCKED  " + blockers;
-        }
-      bool gateOpen = (StringFind(gate, "OPEN") == 0);
-      EnsureLabel(N("HUD_GATE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   gate, gateOpen ? m_bull : m_bear);
+      // Catastrophic-only veto line. ONLY shows if a catastrophic
+      // condition is active — never blocked by component thresholds.
+      // "Catastrophic" = capital state SUSPENDED, funded mode trip,
+      // portfolio cap exceeded. Component scores never appear here.
+      bool   primed = s.primed;
+      string vetoLine;
+      color  vetoCol;
+      if(!primed)        { vetoLine = "WARMUP — perception not primed yet"; vetoCol = m_warn; }
+      else               { vetoLine = "ORGANISM SPEAKING — risk decides loudness"; vetoCol = m_bull; }
+      EnsureLabel(N("HUD_VETO"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   vetoLine, vetoCol);
       row++;
      }
 
+   //--- Helper for component VALUE rows (never pass/fail).
+   void WriteValueLine(string name, int rx, int ry, int row, string label, double value)
+     {
+      string s = StringFormat("%s%s %5.1f", label, GaugeBar(value), value);
+      color c = (value >= 65) ? m_bull : (value >= 35) ? m_warn : m_bear;
+      EnsureLabel(name, m_hudCorner, rx, ry + row * m_lineHeight, s, c);
+     }
+
    //--- Helper for narrative-component rows. Pass/fail at >=50.
+   //    KEPT for backwards-compat with any caller; new HUD uses
+   //    WriteValueLine instead so values display without OK/X.
    void WriteComponent(string name, int rx, int ry, int row, string label, double value)
      {
       bool ok = (value >= 50.0);
@@ -6166,23 +6175,29 @@ public:
      }
 
    //=== Open ========================================================
+   //  Phase 5.6: continuous-allocation entry. The decision engine has
+   //  already emitted a conviction + EV. Risk turns those into a
+   //  conviction-driven size. Catastrophic vetoes (margin, opt-in
+   //  MICRO, broker-min undersized) still apply — those are physics
+   //  and broker rules, not component thresholds. There is no "tier
+   //  conviction floor" skip here anymore.
    ulong Open(int direction, ENUM_POSITION_ROLE role,
               double stopDistPoints, long campaignId,
               ENUM_OMEGA_REASON reason, string detail,
-              const OmegaState &state)
+              const OmegaState &state,
+              double conviction = -1.0,    // Phase 5.6 — pass through from DecisionEngine
+              double evMult     = 1.0)
      {
       if(m_trade == NULL || m_risk == NULL || m_capital == NULL)
         {
          OmegaLogger::LogException("POSITIONS", -1, "Open: dependencies not wired");
          return 0;
         }
-      //--- Phase 5.1.1: tier-aware sizing path with stop floor + margin precheck
-      //    + pyramid budget check + undersized-trade behavior.
       ENUM_OMEGA_TIER tier = m_risk.TierForCap(m_capital);
       double effEquity = m_risk.EffectiveEquity(m_capital);
 
-      //--- Pyramid budget gate: refuse to add when same-side position
-      //    count has hit the per-tier budget.
+      //--- Pyramid budget gate (catastrophic — tier-bounded, not a
+      //    component veto). Refuses to add when same-side count hit.
       int sideCount = CountActive(direction);
       int tierBudget = m_risk.TierMaxBudget(tier);
       if(sideCount >= tierBudget)
@@ -6193,14 +6208,23 @@ public:
          return 0;
         }
 
-      double riskPct  = m_risk.RiskPctFor(state, tier);
+      //--- Phase 5.6 — conviction-driven sizing. If the caller didn't
+      //    pass an explicit conviction (legacy path), Risk derives a
+      //    proxy from the trinity + narrative alignment. Either way
+      //    NO component value can return 0 alone.
+      double riskPct;
+      if(conviction >= 0.0)
+         riskPct = m_risk.RiskPctFromConviction(conviction, evMult, tier);
+      else
+         riskPct = m_risk.RiskPctFor(state, tier);
+
       if(riskPct <= 0.0)
         {
+         //   Only catastrophic conditions reach here (MICRO opt-out,
+         //   tier cap zero, etc.). Log and return.
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · skipped · tier=%s · life=%.0f stab=%.0f conf=%.0f below tier conviction floor (need L%.0f S%.0f C%.0f)",
-                          m_symbol, m_risk.TierStr(tier),
-                          state.life, state.stability, state.confidence,
-                          m_risk.TierMinLife(tier), m_risk.TierMinStab(tier), m_risk.TierMinConf(tier)));
+            StringFormat("%s · skipped (catastrophic) · tier=%s conv=%.0f EV=%.2f → riskPct=0.0",
+                          m_symbol, m_risk.TierStr(tier), conviction, evMult));
          return 0;
         }
       //--- Apply per-tier ATR floor to the stop BEFORE sizing & SL placement.
@@ -6222,34 +6246,32 @@ public:
       double slDist = stopDistPoints * point;
       double sl     = (direction == 1) ? (openPx - slDist) : (openPx + slDist);
 
-      //--- Phase 5.1.1: actual-vs-intended risk check. After broker
-      //    rounding (clamp to volume_min) the effective risk can exceed
-      //    the tier ceiling. Decide skip-vs-proceed per InpUndersizedBehavior.
+      //--- Actual-vs-intended risk after broker rounding.
       double actualPct = m_risk.CalcActualRiskPct(m_symbol, lots, stopDistPoints, effEquity);
       bool   oversized = (actualPct > riskPct + 0.01);
       if(oversized && !m_risk.ResolveUndersized(tier, riskPct, actualPct))
         {
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · skipped · tier=%s · actual %.2f%% > intended %.2f%% (undersized=%s)",
+            StringFormat("%s · skipped (broker-min over-risk) · tier=%s · actual %.2f%% > intended %.2f%% (undersized=%s)",
                           m_symbol, m_risk.TierStr(tier),
                           actualPct, riskPct,
                           m_risk.UndersizedStr(m_risk.UndersizedBehavior())));
          return 0;
         }
 
-      //--- Phase 5.1: pre-trade margin precheck.
+      //--- Catastrophic: pre-trade margin precheck.
       if(!m_risk.PassesMarginCheck(m_symbol, direction, lots, openPx))
         {
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · skipped · margin precheck failed · lots=%.2f openPx=%.5f",
-                          m_symbol, lots, openPx));
+            StringFormat("%s · skipped (margin) · lots=%.2f openPx=%.5f", m_symbol, lots, openPx));
          return 0;
         }
 
-      //--- Phase 5.1.1 — enrich the trade comment so the user sees the
-      //    actual tier + intended-vs-actual risk in MT5's "Comment" column.
-      string tierTag = StringFormat("[%s int=%.2f%% act=%.2f%%%s]",
-                                     m_risk.TierStr(tier), riskPct, actualPct,
+      //--- Enriched comment showing the continuous decision parameters.
+      string tierTag = StringFormat("[%s conv=%.0f EV=%.2f int=%.2f%% act=%.2f%%%s]",
+                                     m_risk.TierStr(tier),
+                                     conviction >= 0 ? conviction : -1.0, evMult,
+                                     riskPct, actualPct,
                                      oversized ? " forced" : "");
       string fullDetail = (StringLen(detail) > 0) ? (tierTag + " " + detail) : tierTag;
 
@@ -6491,6 +6513,16 @@ struct DecisionResult
    int                 suggestedDirection;
    double              stopDistPoints;
    string              detail;
+   //--- Phase 5.6: continuous-allocation outputs (organism speaks).
+   //    The decision engine NEVER gates on component thresholds; it
+   //    emits a conviction (0..100) and an expected-value multiplier.
+   //    Risk converts these into a continuous size in % equity.
+   double              conviction;     // 0..100 weighted blend of all signals
+   double              evWith;         // EV multiplier for owner-direction entry
+   double              evCounter;      // EV multiplier for counter-direction entry
+   double              pCont;          // probability cloud snapshot
+   double              pTrans;
+   double              pTerm;
 
                      DecisionResult()
      {
@@ -6500,6 +6532,10 @@ struct DecisionResult
       suggestedDirection = 0;
       stopDistPoints     = 0;
       detail             = "";
+      conviction         = 0.0;
+      evWith             = 1.0;
+      evCounter          = 1.0;
+      pCont = pTrans = pTerm = 0.0;
      }
   };
 
@@ -6533,9 +6569,68 @@ struct DecisionParams
   };
 
 //=== The decision engine ===========================================
+//
+//  CANONICAL F72 RULE (Phase 5.6 — continuous allocation organism):
+//
+//    "No component except catastrophic risk management may veto a
+//     trade. Components are CONTRIBUTORS, not gates."
+//
+//  Forbidden in here:
+//
+//      if(narrAlign  < 65) return HOLD;
+//      if(stability  < 45) return HOLD;
+//      if(confidence < 40) return HOLD;
+//
+//  Allowed only OUTSIDE this engine (in Capital / Funded / Portfolio /
+//  PassesMarginCheck): kill switch, hard limit, margin unavailable,
+//  market closed, news blackout, max risk exceeded.
+//
+//  This engine emits an ACTION + CONVICTION + EV. Risk converts the
+//  three to a continuous size. A weak narrative produces a small
+//  size, not a refusal. The organism never goes silent.
+//
 class DecisionEngine
   {
 public:
+   //--- Phase 5.6 — Continuous conviction (0..100) from all signals.
+   //    Trinity contributes 60% (life 30, stab 15, conf 15). Narrative
+   //    relationship components contribute 40% (ownership / compression
+   //    / force / chain / parent / progression / transfer, equally
+   //    weighted at ~5.7% each = 40% sum). Contradiction subtracts.
+   //    Components are CONTRIBUTORS — none of them can return 0 alone.
+   static double ComputeConviction(const OmegaState &state,
+                                    const NarrativeAlignment::Components &naComp)
+     {
+      double trinity = state.life       * 0.30
+                     + state.stability  * 0.15
+                     + state.confidence * 0.15;       // 60% weight
+      double rel = (naComp.ownership   + naComp.compression + naComp.force
+                  + naComp.chain       + naComp.parent      + naComp.progression
+                  + naComp.transfer) * (0.40 / 7.0);  // 40% weight, equal sub-weights
+      double conv = trinity + rel - naComp.contradiction;
+      return MathMax(0.0, MathMin(100.0, conv));
+     }
+
+   //--- Phase 5.6 — EV multiplier from probability cloud.
+   //    Range [0..2]. EV > 1 means continuation favoured; EV < 1 means
+   //    terminal more likely. For owner-direction: pCont positive,
+   //    pTerm negative. For counter-direction: pTrans positive,
+   //    pCont negative. If probability cloud isn't yet primed
+   //    (Phase 6 not active), returns 1.0 (neutral).
+   static double ComputeEV(const OmegaState &state, int candidateDir, int ownerDir)
+     {
+      double pCont  = state.supporting.pContinuation;
+      double pTrans = state.supporting.pTransfer;
+      double pTerm  = state.supporting.pTerminal;
+      if(pCont + pTrans + pTerm < 5.0) return 1.0;     // cloud not primed
+      double ev;
+      if(candidateDir == ownerDir)
+         ev = (pCont * 1.0 + pTrans * 0.3 - pTerm * 0.5) / 100.0;
+      else
+         ev = (pTrans * 0.8 + pTerm * 0.5 - pCont * 0.4) / 100.0;
+      return MathMax(0.0, MathMin(2.0, 1.0 + ev));
+     }
+
    //--- Compute stop distance in POINTS from chart-TF curve state.
    //    Prefers the protective extreme (owner curve origin) if available,
    //    else falls back to ATR multiple. Returns 0 if no valid stop.
@@ -6568,7 +6663,23 @@ public:
       return (atr * p.defaultSlAtrMult) / point;
      }
 
-   //--- Main decision dispatcher.
+   //--- Phase 5.6 — Continuous-allocation decision dispatcher.
+   //
+   //  Returns: action (ENTER/HOLD/ADD/REVERSE/REDUCE/EXIT/OBSERVE)
+   //         + conviction (0..100, continuous)
+   //         + evWith / evCounter (probability-cloud multipliers)
+   //
+   //  Sizing happens in Risk::RiskPctFromConviction(conviction, evWith, tier).
+   //  Catastrophic vetoes happen elsewhere (Capital state SUSPENDED,
+   //  margin precheck, funded mode trip, portfolio cap). NEVER here.
+   //
+   //  The only "soft floor" left in this engine is a noise floor at
+   //  conviction × EV < 15 — below that score the engine doesn't
+   //  even compute a meaningful direction; emits OBSERVE and waits.
+   //  This is NOT a component veto — it's the engine refusing to act
+   //  on pure noise. Any single-component value can be 0 and still
+   //  produce an entry IF the rest of the signals are strong.
+   //
    static DecisionResult Decide(const OmegaState &state,
                                  OmegaCurve &curve,
                                  const OmegaStory &story,
@@ -6577,16 +6688,18 @@ public:
                                  const DecisionParams &p)
      {
       DecisionResult r;
-
       int ownerDir = curve.tree.ownerDir;
-      r.suggestedDirection = (ownerDir != 0) ? ownerDir : 0;
+      r.suggestedDirection = ownerDir;
+      r.pCont      = state.supporting.pContinuation;
+      r.pTrans     = state.supporting.pTransfer;
+      r.pTerm      = state.supporting.pTerminal;
+      r.conviction = ComputeConviction(state, story.naComp);
+      r.evWith     = (ownerDir != 0) ? ComputeEV(state, ownerDir,  ownerDir) : 1.0;
+      r.evCounter  = (ownerDir != 0) ? ComputeEV(state, -ownerDir, ownerDir) : 1.0;
 
-      //=== FORCE-TRADE FALLBACK ====================================
-      //   If perception hasn't primed yet OR no curve owner exists,
-      //   fall back to a simple bar-bias entry so the engine still
-      //   trades. Compares close[1] vs close[5] on the current chart;
-      //   non-zero diff -> direction. Once perception primes, the
-      //   normal verdict ladder below takes over.
+      //=== FORCE-FALLBACK during warmup ============================
+      //   Perception not primed OR no curve owner → simple bar-bias
+      //   so the engine still trades during the first ~10 bars.
       if(!state.primed || ownerDir == 0)
         {
          double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
@@ -6600,161 +6713,134 @@ public:
                r.suggestedDirection = bias;
                r.suggestedRole      = POS_ORIGIN;
                r.reason             = REASON_HEARTBEAT;
+               r.conviction         = 25.0;     // small conviction → small size
+               r.evWith             = 1.0;
                r.detail             = StringFormat("force-fallback · primed=%s ownerDir=%d bias=%d",
                                                    state.primed ? "Y" : "N", ownerDir, bias);
                return r;
               }
            }
-         //-- already in a position OR no bias yet — observe
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = state.primed ? REASON_OWNERSHIP_LEAKING : REASON_PHASE_NOT_BUILT;
-         r.detail   = "fallback path · waiting for bias or holding existing position";
+         r.detail   = "warmup · waiting for owner curve to take wheel";
          return r;
         }
 
-      //--- 2. Verdict bucketing
       ENUM_LIFE_VERDICT verdict = LifeScore::Verdict(state.life);
-      r.suggestedDirection = ownerDir;
-      r.stopDistPoints     = ComputeStopDistPoints(state.supporting.regime > 0 ? "" : "",
-                                                    curve, ownerDir, p);
-      //-- the empty string above is just a placeholder; real symbol resolved in Execution
-      //   Re-compute properly using actual symbol when called from EA.
 
-      //--- 3. DEAD: holding wrong side / flip-or-flat
+      //--- DEAD: existing campaign collapsed =======================
       if(verdict == LIFE_DEAD)
         {
          if(activeSameDirCount > 0)
            {
             r.decision = OMEGA_DEC_EXIT;
             r.reason   = REASON_LIFE_DEAD;
-            r.detail   = StringFormat("life %.1f dead, exit %d position(s)",
+            r.detail   = StringFormat("life %.1f dead · exit %d position(s)",
                                        state.life, activeSameDirCount);
             return r;
            }
-         if(state.confidence >= p.reverseMinConf && activeCounterCount == 0)
+         //   Counter-side opportunity: continuous conv × counter-EV.
+         //   No "confidence >= 50" gate. Conviction × EV produces a score;
+         //   below the noise floor we WAIT (not BLOCK).
+         if(activeCounterCount == 0)
            {
-            r.decision           = OMEGA_DEC_REVERSE;
-            r.reason             = REASON_OWNERSHIP_TRANSFER;
-            r.suggestedDirection = -ownerDir;
-            r.suggestedRole      = POS_ORIGIN;
-            r.detail             = StringFormat("life dead, conf %.0f -> flip to %s",
-                                                state.confidence, (-ownerDir == 1 ? "LONG" : "SHORT"));
-            return r;
+            double counterScore = r.conviction * r.evCounter / 100.0;
+            if(counterScore > 25.0)
+              {
+               r.decision           = OMEGA_DEC_REVERSE;
+               r.reason             = REASON_OWNERSHIP_TRANSFER;
+               r.suggestedDirection = -ownerDir;
+               r.suggestedRole      = POS_ORIGIN;
+               r.conviction         = r.conviction;     // explicit
+               r.detail             = StringFormat("flip · counter-EV %.2f × conv %.0f = %.0f",
+                                                   r.evCounter, r.conviction, counterScore);
+               return r;
+              }
            }
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = REASON_LIFE_DEAD;
-         r.detail   = "dead but conf too low to flip";
+         r.detail   = StringFormat("dead · counter-EV %.2f × conv %.0f insufficient",
+                                    r.evCounter, r.conviction);
          return r;
         }
 
-      //--- 4. WEAKENING: reduce profitable, else hold
+      //--- WEAKENING ===============================================
       if(verdict == LIFE_WEAKENING)
         {
          if(activeSameDirCount > 0 && state.life < p.reduceLifeFloor && !story.progressing)
            {
             r.decision = OMEGA_DEC_REDUCE;
             r.reason   = REASON_LIFE_WEAKENING;
-            r.detail   = StringFormat("life %.1f weakening, reduce while profitable", state.life);
+            r.detail   = StringFormat("life %.1f weakening · reduce", state.life);
             return r;
            }
          if(activeSameDirCount > 0)
            {
             r.decision = OMEGA_DEC_HOLD;
             r.reason   = REASON_LIFE_WEAKENING;
-            r.detail   = StringFormat("life %.1f weakening, hold", state.life);
+            r.detail   = StringFormat("life %.1f weakening · hold", state.life);
             return r;
            }
+         //   No position. Do not enter into weakening — but produce
+         //   OBSERVE with explicit conviction × EV so the user sees why,
+         //   not a "BLOCKED" gate label.
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = REASON_LIFE_WEAKENING;
-         r.detail   = "weakening, no entry";
+         r.detail   = StringFormat("weakening · conv %.0f × EV %.2f insufficient for fresh entry",
+                                    r.conviction, r.evWith);
          return r;
         }
 
-      //--- 5. HOLDING / ALIVE: entries and adds.
-      //    Phase 5.5.3 — narrative-coherence gate (per F72 spec).
-      //    The single relationship-quality gate, applied AFTER Trinity
-      //    floors. `aligned` no longer means "TF count >= N"; it means
-      //    "the relationships supporting this story are coherent enough"
-      //    (NarrativeAlignment::Compute total >= p.narrAlignMin).
-      bool aligned = (state.supporting.alignment >= p.narrAlignMin);
-
-      if(verdict == LIFE_HOLDING)
-        {
-         if(activeSameDirCount == 0)
-           {
-            if(state.confidence >= p.enterMinConf
-               && state.stability >= p.enterMinStability
-               && aligned)
-              {
-               r.decision      = OMEGA_DEC_ENTER_LONG;
-               if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
-               r.reason        = REASON_HEALTHY_CONTINUATION;
-               r.suggestedRole = POS_ORIGIN;
-               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f narr-align %.0f%% — origin entry",
-                                              state.life, state.stability, state.confidence,
-                                              state.supporting.alignment);
-               return r;
-              }
-            r.decision = OMEGA_DEC_OBSERVE;
-            r.reason   = REASON_NARRATIVE_DIVERGE;
-            r.detail   = StringFormat("holding · stab %.0f conf %.0f narr-align %.0f%% below entry",
-                                       state.stability, state.confidence, state.supporting.alignment);
-            return r;
-           }
-         r.decision = OMEGA_DEC_HOLD;
-         r.reason   = REASON_LIFE_HEALTHY;
-         r.detail   = "holding, position open";
-         return r;
-        }
-
-      // verdict == ALIVE
+      //--- HOLDING / ALIVE — CONTINUOUS ALLOCATION ================
+      //  The organism speaks. Conviction × EV drives action and size.
+      //  Component-level vetoes are forbidden here — the only filter
+      //  is a noise floor that prevents firing on essentially-random
+      //  state combinations.
       if(activeSameDirCount == 0)
         {
-         if(state.confidence >= p.attackMinConf
-            && state.stability >= p.attackMinStab
-            && aligned)
+         double score = r.conviction * r.evWith / 100.0;
+         if(score < 15.0)
            {
-            r.decision      = OMEGA_DEC_ENTER_LONG;
-            if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
-            r.reason        = REASON_HEALTHY_CONTINUATION;
-            r.suggestedRole = POS_ORIGIN;
-            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f narr-align %.0f%% — origin entry (strong)",
-                                            state.life, state.stability, state.confidence,
-                                            state.supporting.alignment);
+            r.decision = OMEGA_DEC_OBSERVE;
+            r.reason   = REASON_LIFE_HEALTHY;
+            r.detail   = StringFormat("conv %.0f × EV %.2f = %.0f below noise floor — wait",
+                                      r.conviction, r.evWith, score);
             return r;
            }
-         //-- alive but conditions for full attack not met → demote to normal entry
-         if(state.stability >= p.enterMinStability
-            && state.confidence >= p.enterMinConf
-            && aligned)
-           {
-            r.decision = (ownerDir == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
-            r.reason   = REASON_HEALTHY_CONTINUATION;
-            r.suggestedRole = POS_ORIGIN;
-            r.detail = "alive but support conditions soft — origin entry (normal)";
-            return r;
-           }
-         r.decision = OMEGA_DEC_OBSERVE;
-         r.reason   = REASON_NARRATIVE_DIVERGE;
-         r.detail   = StringFormat("alive · stab %.0f conf %.0f narr-align %.0f%% below threshold",
-                                    state.stability, state.confidence, state.supporting.alignment);
+         r.decision = (ownerDir == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
+         r.reason   = REASON_HEALTHY_CONTINUATION;
+         r.suggestedRole = POS_ORIGIN;
+         r.detail = StringFormat("ENTER · %s · conv %.0f × EV %.2f = %.0f",
+                                 verdict == LIFE_ALIVE ? "ALIVE" : "HOLDING",
+                                 r.conviction, r.evWith, score);
          return r;
         }
 
-      //-- already in: pyramiding logic
+      //--- pyramiding — same continuous model =====================
       int totalSameDir = activeSameDirCount;
       if(totalSameDir < p.maxBudget && story.progressing)
         {
-         r.decision      = OMEGA_DEC_ADD;
-         r.reason        = REASON_HEALTHY_CONTINUATION;
-         r.suggestedRole = POS_PROGRESS;
-         r.detail        = StringFormat("ALIVE + progressing, %d/%d budget — pyramid add",
-                                         totalSameDir + 1, p.maxBudget);
-         return r;
+         double addScore = r.conviction * r.evWith / 100.0;
+         //   Adds need slightly higher score than first entries to
+         //   prevent compounding weak setups. Still continuous, never
+         //   a component veto.
+         if(addScore >= 25.0)
+           {
+            r.decision      = OMEGA_DEC_ADD;
+            r.reason        = REASON_HEALTHY_CONTINUATION;
+            r.suggestedRole = POS_PROGRESS;
+            r.detail        = StringFormat("ADD %d/%d · conv %.0f × EV %.2f = %.0f",
+                                            totalSameDir + 1, p.maxBudget,
+                                            r.conviction, r.evWith, addScore);
+            return r;
+           }
         }
       r.decision = OMEGA_DEC_HOLD;
       r.reason   = REASON_LIFE_HEALTHY;
-      r.detail   = (totalSameDir >= p.maxBudget) ? "at budget" : "alive, waiting for progression";
+      r.detail   = (totalSameDir >= p.maxBudget)
+                     ? "at budget · hold"
+                     : StringFormat("progressing pending · conv %.0f × EV %.2f insufficient for add",
+                                    r.conviction, r.evWith);
       return r;
      }
   };
@@ -6827,11 +6913,17 @@ public:
 
    //--- The single decision-handling entry point. Logs every decision,
    //    gates by capital state, then routes to CampaignPositions.
+   //
+   //    Phase 5.6: now accepts conviction + evMult from DecisionEngine
+   //    so Risk can size the position continuously. Default values
+   //    (-1, 1.0) preserve the legacy proxy-conviction path.
    void HandleDecision(string symbol, ENUM_OMEGA_DECISION dec, ENUM_OMEGA_REASON reason,
                         const OmegaState &state, double stopDistPts, string detail,
                         ENUM_POSITION_ROLE role = POS_ENTRY,
                         int suggestedDir = 0,
-                        long campaignId = 0)
+                        long campaignId = 0,
+                        double conviction = -1.0,
+                        double evMult     = 1.0)
      {
       OmegaLogger::LogDecision(symbol, m_trade.Mode(), dec, reason,
                                 state.life, state.stability, state.confidence, detail);
@@ -6881,14 +6973,14 @@ public:
       switch(dec)
         {
          case OMEGA_DEC_ENTER_LONG:
-            m_positions.Open(+1, role, stopDistPts, campaignId, reason, detail, state);
+            m_positions.Open(+1, role, stopDistPts, campaignId, reason, detail, state, conviction, evMult);
             break;
          case OMEGA_DEC_ENTER_SHORT:
-            m_positions.Open(-1, role, stopDistPts, campaignId, reason, detail, state);
+            m_positions.Open(-1, role, stopDistPts, campaignId, reason, detail, state, conviction, evMult);
             break;
          case OMEGA_DEC_ADD:
             if(suggestedDir == 0) suggestedDir = +1;
-            m_positions.Open(suggestedDir, role, stopDistPts, campaignId, reason, detail, state);
+            m_positions.Open(suggestedDir, role, stopDistPts, campaignId, reason, detail, state, conviction, evMult);
             break;
          case OMEGA_DEC_REVERSE:
            {
@@ -6896,7 +6988,7 @@ public:
             m_positions.CloseAll(oldDir, REASON_OWNERSHIP_TRANSFER,
                                   "REVERSE: closing prior side before flip");
             m_positions.Open(suggestedDir, POS_ORIGIN, stopDistPts, campaignId,
-                              reason, "REVERSE: flipped to counter", state);
+                              reason, "REVERSE: flipped to counter", state, conviction, evMult);
             break;
            }
          case OMEGA_DEC_EXIT:
@@ -6913,7 +7005,7 @@ public:
             int oldDirT = -suggestedDir;
             m_positions.CloseAll(oldDirT, REASON_OWNERSHIP_TRANSFER, detail);
             m_positions.Open(suggestedDir, POS_ORIGIN, stopDistPts, campaignId,
-                              reason, detail, state);
+                              reason, detail, state, conviction, evMult);
             break;
            }
          default:
@@ -9158,7 +9250,8 @@ void OnTick()
          g_meta.RecordDecision(dr.decision);
          g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
                                 dr.stopDistPoints, dr.detail,
-                                dr.suggestedRole, dr.suggestedDirection, campaignId);
+                                dr.suggestedRole, dr.suggestedDirection, campaignId,
+                                dr.conviction, dr.evWith);
          //--- Phase 5.5: keep the most recent verdict for the HUD readout.
          g_lastDecision = dr.decision;
          g_lastReason   = dr.reason;
