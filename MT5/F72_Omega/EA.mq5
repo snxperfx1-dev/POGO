@@ -28,6 +28,9 @@
 #include "Include/Capital.mqh"
 #include "Include/Risk.mqh"
 #include "Include/PaperTrade.mqh"
+#include "Include/Position/PositionHealth.mqh"
+#include "Include/Position/CampaignPositions.mqh"
+#include "Include/Position/DecisionEngine.mqh"
 #include "Include/Execution.mqh"
 #include "Include/Session.mqh"
 #include "Include/News.mqh"
@@ -69,13 +72,15 @@ input double              InpImpulseMult      = 1.5;                  // Impulse
 input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
 
 //================== GLOBALS =========================================
-OmegaState     g_state;
-OmegaCapital   g_capital;
-OmegaRisk      g_risk;
-CampaignDB     g_db;
-OmegaExecution g_exec;
-OmegaCurve     g_curve;        // Phase 2: multi-TF perception
-OmegaStory     g_story;        // Phase 4: narrative engine
+OmegaState        g_state;
+OmegaCapital      g_capital;
+OmegaRisk         g_risk;
+CampaignDB        g_db;
+CampaignPositions g_positions;   // Phase 5: campaign-aware position manager
+OmegaExecution    g_exec;
+OmegaCurve        g_curve;       // Phase 2: multi-TF perception
+OmegaStory        g_story;       // Phase 4: narrative engine
+DecisionParams    g_dparams;     // Phase 5: decision tunables
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 
@@ -105,8 +110,14 @@ int OnInit()
 //--- 5. Campaign memory
    g_db.Init();
 
-//--- 6. Execution shell
+//--- 6. Execution shell + Position manager (Phase 5).
+//    Init order: exec first (creates trade shell), then positions
+//    (uses exec.TradeShell()), then exec.SetPositions(...) wires the
+//    decision-handling path to the position manager.
    g_exec.Init(InpMode, InpMagic, GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
+   g_positions.Init(_Symbol, InpMagic, g_exec.TradeShell(),
+                     GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
+   g_exec.SetPositions(GetPointer(g_positions));
 
 //--- 7. Perception (Phase 2): multi-TF curve engine.
    if(!g_curve.Init(_Symbol, (ENUM_TIMEFRAMES)_Period,
@@ -165,9 +176,33 @@ void OnTick()
       g_state.primed = g_curve.primed;
       //--- Phase 4: narrative reads curve+tree and writes life/stability/
       //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
-      g_story.Update(g_state, g_curve);
+      bool storyAdvanced = g_story.Update(g_state, g_curve);
+      g_state.DeriveTrinity();
+
+      //--- Phase 5: each closed bar, ask the decision engine, route the
+      //    answer through Execution → CampaignPositions, then trail stops.
+      if(storyAdvanced)
+        {
+         int activeSame    = g_positions.CountActive(g_curve.tree.ownerDir);
+         int activeCounter = g_positions.CountActive(-g_curve.tree.ownerDir);
+         DecisionResult dr = DecisionEngine::Decide(g_state, g_curve, g_story,
+                                                     activeSame, activeCounter, g_dparams);
+         //-- the engine left stopDistPoints as a placeholder; recompute with real symbol
+         dr.stopDistPoints = DecisionEngine::ComputeStopDistPoints(_Symbol, g_curve,
+                              dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir,
+                              g_dparams);
+         long campaignId = (g_curve.tree.ownerIndex >= 0)
+                            ? g_curve.tree.tree[g_curve.tree.ownerIndex].id : 0;
+         g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
+                                dr.stopDistPoints, dr.detail,
+                                dr.suggestedRole, dr.suggestedDirection, campaignId);
+         g_positions.BarUpdate(g_state, g_curve);
+        }
      }
-   g_state.DeriveTrinity();
+   else g_state.DeriveTrinity();
+
+   //-- per-tick: update MFE/MAE on every position
+   g_positions.TickUpdate();
   }
 
 //+------------------------------------------------------------------+
@@ -181,7 +216,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s]",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -192,7 +227,8 @@ void OnTimer()
          OmegaNews::Environment(),
          g_state.Snapshot(),
          g_curve.Snapshot(),
-         g_story.Snapshot()));
+         g_story.Snapshot(),
+         g_positions.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

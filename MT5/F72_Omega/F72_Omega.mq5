@@ -2,7 +2,7 @@
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|       *** SINGLE-FILE BUNDLE — Phases 1+2+3+4 ***                |
+//|       *** SINGLE-FILE BUNDLE — Phases 1+2+3+4+5 ***              |
 //|                                                                  |
 //|   This file contains every module of the F72 OMEGA engine        |
 //|   inlined in dependency order. To reproduce the modular layout,  |
@@ -14,8 +14,8 @@
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Phases 1+2+3+4 bundled: skeleton + perception + tree + narrative."
-#property description "Trinity LIVE: LifeScore · StoryStability · StoryConfidence."
+#property description "Phases 1+2+3+4+5 bundled · skeleton + perception + tree + narrative + positions."
+#property description "Trinity LIVE. Engine trades."
 
 #include <Trade/Trade.mqh>
 
@@ -1233,42 +1233,44 @@ public:
      }
    ENUM_OMEGA_MODE Mode() const { return m_mode; }
 
-   //--- BUY
-   bool Buy(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
+   //--- BUY → returns broker ticket (or paper ticket); 0 = failure
+   ulong Buy(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
      {
       double price = SymbolInfoDouble(symbol, SYMBOL_ASK);
       if(LiveMode())
         {
          bool ok = m_trade.Buy(lots, symbol, price, sl, tp, detail);
-         OmegaLogger::LogExecution(symbol, "BUY", m_trade.ResultOrder(),
+         ulong tk = m_trade.ResultOrder();
+         OmegaLogger::LogExecution(symbol, "BUY", tk,
                                     m_trade.ResultPrice(), lots, reason,
             StringFormat("live=%s ret=%u %s", ok?"true":"false",
                          m_trade.ResultRetcode(), detail));
-         return ok;
+         return ok ? tk : 0;
         }
       ulong ticket = ++m_paperTicket;
       OmegaLogger::LogExecution(symbol, "BUY-PAPER", ticket, price, lots, reason,
          StringFormat("sl=%.5f tp=%.5f %s", sl, tp, detail));
-      return true;
+      return ticket;
      }
 
-   //--- SELL
-   bool Sell(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
+   //--- SELL → returns broker ticket (or paper ticket); 0 = failure
+   ulong Sell(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
      {
       double price = SymbolInfoDouble(symbol, SYMBOL_BID);
       if(LiveMode())
         {
          bool ok = m_trade.Sell(lots, symbol, price, sl, tp, detail);
-         OmegaLogger::LogExecution(symbol, "SELL", m_trade.ResultOrder(),
+         ulong tk = m_trade.ResultOrder();
+         OmegaLogger::LogExecution(symbol, "SELL", tk,
                                     m_trade.ResultPrice(), lots, reason,
             StringFormat("live=%s ret=%u %s", ok?"true":"false",
                          m_trade.ResultRetcode(), detail));
-         return ok;
+         return ok ? tk : 0;
         }
       ulong ticket = ++m_paperTicket;
       OmegaLogger::LogExecution(symbol, "SELL-PAPER", ticket, price, lots, reason,
          StringFormat("sl=%.5f tp=%.5f %s", sl, tp, detail));
-      return true;
+      return ticket;
      }
 
    //--- CLOSE
@@ -1304,149 +1306,6 @@ public:
   };
 
 #endif // __OMEGA_PAPER_MQH__
-
-//==================================================================
-//= MODULE: Execution
-//= Source: Include/Execution.mqh
-//==================================================================
-//+------------------------------------------------------------------+
-//|                                                    Execution.mqh |
-//|                                                        F72 OMEGA |
-//|                                                                  |
-//|   Layer-15 surface. Receives a (decision, reason, state) triple, |
-//|   gates it through the Capital state machine, asks Risk for the  |
-//|   conviction-tier-appropriate lot size, and routes it to the     |
-//|   PaperTrade shell. EVERYTHING is logged.                        |
-//|                                                                  |
-//|   Phase 1: only the gate + log path is wired. Actual              |
-//|   ENTRY/EXIT/REVERSE/TRANSFER plumbing belongs to Phase 5         |
-//|   (CampaignPositions + PositionHealth). The shape is fixed now    |
-//|   so later phases plug in without touching the contract.          |
-//+------------------------------------------------------------------+
-#ifndef __OMEGA_EXECUTION_MQH__
-#define __OMEGA_EXECUTION_MQH__
-
-
-//=== Position roles within a campaign (Layer 5: granularity) =======
-enum ENUM_OMEGA_POSITION_ROLE
-  {
-   POS_ROLE_ORIGIN     = 0,
-   POS_ROLE_ENTRY      = 1,
-   POS_ROLE_PROGRESS   = 2,
-   POS_ROLE_TERMINAL   = 3
-  };
-
-class OmegaExecution
-  {
-private:
-   OmegaPaperTrade  m_trade;
-   OmegaCapital    *m_capital;
-   OmegaRisk       *m_risk;
-   CampaignDB      *m_db;
-
-public:
-                     OmegaExecution()
-     {
-      m_capital = NULL;
-      m_risk    = NULL;
-      m_db      = NULL;
-     }
-
-   void Init(ENUM_OMEGA_MODE mode, ulong magic,
-             OmegaCapital *capital, OmegaRisk *risk, CampaignDB *db)
-     {
-      m_trade.Init(mode, magic);
-      m_capital = capital;
-      m_risk    = risk;
-      m_db      = db;
-      OmegaLogger::LogInfo("EXEC", "Initialized");
-     }
-
-   void SetMode(ENUM_OMEGA_MODE mode) { m_trade.SetMode(mode); }
-   ENUM_OMEGA_MODE Mode() const       { return m_trade.Mode(); }
-
-   //--- The single entry point for every decision.
-   //    OBSERVE / HOLD log only. Everything else is gated by capital
-   //    state, risk-tiered, and routed through the paper shell.
-   void HandleDecision(string symbol, ENUM_OMEGA_DECISION dec, ENUM_OMEGA_REASON reason,
-                        const OmegaState &state, double stopDistPts, string detail)
-     {
-      OmegaLogger::LogDecision(symbol, m_trade.Mode(), dec, reason,
-                                state.life, state.stability, state.confidence, detail);
-      if(dec == OMEGA_DEC_OBSERVE || dec == OMEGA_DEC_HOLD)
-         return;
-
-      //--- Capital gate
-      if(m_capital == NULL)
-        {
-         OmegaLogger::LogException("EXEC", -1, "Capital not wired");
-         return;
-        }
-      ENUM_OMEGA_CAPITAL_STATE cs = m_capital.State();
-      if(cs == CAPITAL_SUSPENDED)
-        {
-         OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
-                                   REASON_HARD_LIMIT,
-                                   state.life, state.stability, state.confidence,
-                                   "Capital SUSPENDED — decision suppressed");
-         return;
-        }
-      if(cs == CAPITAL_RESTRICTED &&
-         (dec == OMEGA_DEC_ENTER_LONG || dec == OMEGA_DEC_ENTER_SHORT || dec == OMEGA_DEC_ADD))
-        {
-         OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
-                                   REASON_DAILY_LIMIT,
-                                   state.life, state.stability, state.confidence,
-                                   "Capital RESTRICTED — entry suppressed (managing only)");
-         return;
-        }
-
-      //--- Risk gate
-      if(m_risk == NULL)
-        {
-         OmegaLogger::LogException("EXEC", -2, "Risk not wired");
-         return;
-        }
-      double riskPct = m_risk.RiskPctFor(state);
-      double lots    = m_risk.LotsFor(symbol, riskPct, stopDistPts, m_capital);
-      if(lots <= 0)
-        {
-         OmegaLogger::LogWarning("EXEC",
-            StringFormat("%s · zero lots · risk=%.2f%% sd=%.0f", symbol, riskPct, stopDistPts));
-         return;
-        }
-
-      //--- Phase 1 stub: SL/TP are owned by PositionHealth (Phase 5).
-      //    Until then we route entries with sl=0, tp=0 (broker will
-      //    accept; PositionHealth will set them post-fill).
-      double sl = 0.0, tp = 0.0;
-
-      switch(dec)
-        {
-         case OMEGA_DEC_ENTER_LONG:
-         case OMEGA_DEC_ADD:
-            m_trade.Buy(symbol, lots, sl, tp, reason,
-                        StringFormat("risk=%.2f%% sd=%.0f %s", riskPct, stopDistPts, detail));
-            break;
-         case OMEGA_DEC_ENTER_SHORT:
-            m_trade.Sell(symbol, lots, sl, tp, reason,
-                         StringFormat("risk=%.2f%% sd=%.0f %s", riskPct, stopDistPts, detail));
-            break;
-         case OMEGA_DEC_REVERSE:
-         case OMEGA_DEC_TRANSFER:
-         case OMEGA_DEC_REDUCE:
-         case OMEGA_DEC_EXIT:
-            OmegaLogger::LogInfo("EXEC",
-               StringFormat("%s · %s · deferred to Phase 5 (CampaignPositions/PositionHealth)",
-                            symbol, OmegaStr::DecisionToString(dec)));
-            break;
-         default:
-            break;
-        }
-     }
-  };
-
-#endif // __OMEGA_EXECUTION_MQH__
 
 //==================================================================
 //= MODULE: Curve/CurvePhysics
@@ -3992,6 +3851,947 @@ public:
 #endif // __OMEGA_NARRATIVE_STORY_MQH__
 
 //==================================================================
+//= MODULE: Position/PositionHealth
+//= Source: Include/Position/PositionHealth.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                              PositionHealth.mqh  |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 7 / 13 — single-position state and health tracking.      |
+//|                                                                  |
+//|   Each campaign has multiple positions, each with its own role:  |
+//|     ORIGIN     — first commitment (early in the life)            |
+//|     ENTRY      — continuation entries on healthy progression     |
+//|     PROGRESS   — pyramid adds on new extremes                    |
+//|     TERMINAL   — late add when price approaches HTF objective    |
+//|                                                                  |
+//|   PositionHealth tracks each position's:                         |
+//|     ticket / role / direction / open price / volume              |
+//|     campaignId — FK into CampaignDB                              |
+//|     initial SL / current SL / initial TP                         |
+//|     MAE / MFE  — max adverse / favorable excursion (point units) |
+//|     trailTier — # of times SL has stepped up                     |
+//|     pnl, age, alive flag                                         |
+//|                                                                  |
+//|   Role-based behaviour and SL trailing rules live in the         |
+//|   CampaignPositions manager (above this module).                 |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_POSITION_HEALTH_MQH__
+#define __OMEGA_POSITION_HEALTH_MQH__
+
+
+//=== Position role inside a campaign ================================
+enum ENUM_POSITION_ROLE
+  {
+   POS_ORIGIN     = 0,
+   POS_ENTRY      = 1,
+   POS_PROGRESS   = 2,
+   POS_TERMINAL   = 3
+  };
+
+class PositionRoleStr
+  {
+public:
+   static string ToString(ENUM_POSITION_ROLE r)
+     {
+      switch(r)
+        {
+         case POS_ORIGIN:    return "ORIGIN";
+         case POS_ENTRY:     return "ENTRY";
+         case POS_PROGRESS:  return "PROGRESS";
+         case POS_TERMINAL:  return "TERMINAL";
+        }
+      return "?";
+     }
+  };
+
+//=== Per-position record ============================================
+struct OmegaPosition
+  {
+   //--- identity
+   ulong              ticket;
+   long               campaignId;
+   string             symbol;
+   ENUM_POSITION_ROLE role;
+   int                direction;        // +1 / -1
+   bool               alive;
+   bool               isPaper;          // true = paper ticket, not live
+
+   //--- prices / sizing
+   double             openPrice;
+   double             openVolume;
+   double             currentVolume;    // may be reduced by partial closes
+   double             initialSL;
+   double             currentSL;
+   double             initialTP;        // 0 if none — managed by trail
+
+   //--- bookkeeping
+   datetime           opened;
+   datetime           closed;
+
+   //--- excursion (in points)
+   double             maxFavorablePts;
+   double             maxAdversePts;
+   int                trailTier;        // 0 = initial, 1 = breakeven, 2 = +1R …
+
+   //--- realized P&L when closed (broker units)
+   double             realizedPnl;
+   ENUM_OMEGA_REASON  closeReason;
+
+                     OmegaPosition() { Reset(); }
+
+   void Reset()
+     {
+      ticket = 0; campaignId = 0; symbol = "";
+      role = POS_ENTRY; direction = 0;
+      alive = false; isPaper = false;
+      openPrice = openVolume = currentVolume = 0;
+      initialSL = currentSL = initialTP = 0;
+      opened = 0; closed = 0;
+      maxFavorablePts = maxAdversePts = 0;
+      trailTier = 0;
+      realizedPnl = 0;
+      closeReason = REASON_NONE;
+     }
+
+   //--- update MFE/MAE on a fresh tick (point units = price-point ATR-style)
+   void TickExcursion(double bid, double ask)
+     {
+      if(!alive) return;
+      double price = (direction == 1) ? bid : ask;
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(point <= 0) return;
+      double favPts = ((direction == 1) ? (price - openPrice) : (openPrice - price)) / point;
+      double advPts = -favPts;
+      if(favPts > maxFavorablePts) maxFavorablePts = favPts;
+      if(advPts > maxAdversePts)   maxAdversePts   = advPts;
+     }
+
+   //--- distance (points) from current price to currentSL
+   double SLPoints() const
+     {
+      if(initialSL <= 0 || openPrice <= 0) return 0.0;
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(point <= 0) return 0.0;
+      return MathAbs(openPrice - initialSL) / point;
+     }
+
+   //--- short snapshot for logs
+   string Snapshot() const
+     {
+      return StringFormat("#%I64u %s %s %.2f%s @ %.5f sl=%.5f mfe=%.0f mae=%.0f tier=%d alive=%s camp=%I64d",
+                          ticket, PositionRoleStr::ToString(role),
+                          (direction == 1 ? "LONG" : "SHORT"),
+                          currentVolume, isPaper ? "(P)" : "",
+                          openPrice, currentSL,
+                          maxFavorablePts, maxAdversePts, trailTier,
+                          alive ? "Y" : "N",
+                          campaignId);
+     }
+  };
+
+#endif // __OMEGA_POSITION_HEALTH_MQH__
+
+//==================================================================
+//= MODULE: Position/CampaignPositions
+//= Source: Include/Position/CampaignPositions.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                          CampaignPositions.mqh   |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 13/15 — campaign-aware position manager.                 |
+//|                                                                  |
+//|   Tracks every open position keyed by ticket. Supports:          |
+//|     - Origin / Entry / Progress / Terminal roles                 |
+//|     - hedge mode (longs and shorts coexisting)                   |
+//|     - pyramiding within a campaign (multiple progress positions) |
+//|     - SL trailing in tiers (initial → breakeven → +1R → +2R …)   |
+//|     - partial reductions                                         |
+//|     - mass exit                                                  |
+//|     - explainability: every action goes through OmegaLogger      |
+//|                                                                  |
+//|   Reads orders back from the live broker via OnTradeTransaction  |
+//|   so that even manual broker-side closes are reflected.          |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CAMPAIGN_POSITIONS_MQH__
+#define __OMEGA_CAMPAIGN_POSITIONS_MQH__
+
+
+#define OMEGA_POS_CAPACITY 32
+
+class CampaignPositions
+  {
+private:
+   OmegaPosition       m_pos[OMEGA_POS_CAPACITY];
+   int                 m_count;
+   string              m_symbol;
+   ulong               m_magic;
+   OmegaPaperTrade    *m_trade;
+   OmegaCapital       *m_capital;
+   OmegaRisk          *m_risk;
+   CampaignDB         *m_db;
+
+   //--- find an empty slot (or evict oldest closed)
+   int FindFreeSlot()
+     {
+      for(int i = 0; i < m_count; i++)
+         if(!m_pos[i].alive && m_pos[i].ticket == 0) return i;
+      if(m_count < OMEGA_POS_CAPACITY) return m_count++;
+      //-- full: evict oldest closed
+      int evict = -1;
+      datetime oldest = D'2099.01.01';
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_pos[i].alive) continue;
+         if(m_pos[i].closed > 0 && m_pos[i].closed < oldest)
+           {
+            oldest = m_pos[i].closed;
+            evict = i;
+           }
+        }
+      if(evict >= 0) { m_pos[evict].Reset(); return evict; }
+      return -1;
+     }
+
+   int IndexOfTicket(ulong ticket) const
+     {
+      for(int i = 0; i < m_count; i++)
+         if(m_pos[i].ticket == ticket) return i;
+      return -1;
+     }
+
+public:
+                     CampaignPositions()
+     {
+      m_count = 0; m_symbol = ""; m_magic = 0;
+      m_trade = NULL; m_capital = NULL; m_risk = NULL; m_db = NULL;
+     }
+
+   void Init(string sym, ulong magic,
+             OmegaPaperTrade *trade, OmegaCapital *capital, OmegaRisk *risk, CampaignDB *db)
+     {
+      m_symbol  = sym;
+      m_magic   = magic;
+      m_trade   = trade;
+      m_capital = capital;
+      m_risk    = risk;
+      m_db      = db;
+      m_count   = 0;
+      OmegaLogger::LogInfo("POSITIONS",
+         StringFormat("Init %s · capacity=%d · magic=%I64u", sym, OMEGA_POS_CAPACITY, magic));
+     }
+
+   //=== Counters ===================================================
+   int CountActive(int direction = 0) const
+     {
+      int n = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         if(direction != 0 && m_pos[i].direction != direction) continue;
+         n++;
+        }
+      return n;
+     }
+
+   int CountByRole(ENUM_POSITION_ROLE role, int direction = 0) const
+     {
+      int n = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         if(m_pos[i].role != role) continue;
+         if(direction != 0 && m_pos[i].direction != direction) continue;
+         n++;
+        }
+      return n;
+     }
+
+   double TotalRisk() const
+     {
+      double tot = 0;
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      double tickSize = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickVal  = SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_VALUE);
+      if(point <= 0 || tickSize <= 0 || tickVal <= 0) return 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         double slPts = m_pos[i].SLPoints();
+         double riskMoney = (slPts * point / tickSize) * tickVal * m_pos[i].currentVolume;
+         tot += riskMoney;
+        }
+      return tot;
+     }
+
+   //=== Open ========================================================
+   ulong Open(int direction, ENUM_POSITION_ROLE role,
+              double stopDistPoints, long campaignId,
+              ENUM_OMEGA_REASON reason, string detail,
+              const OmegaState &state)
+     {
+      if(m_trade == NULL || m_risk == NULL || m_capital == NULL)
+        {
+         OmegaLogger::LogException("POSITIONS", -1, "Open: dependencies not wired");
+         return 0;
+        }
+      double riskPct = m_risk.RiskPctFor(state);
+      double lots    = m_risk.LotsFor(m_symbol, riskPct, stopDistPoints, m_capital);
+      if(lots <= 0)
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · zero lots · risk=%.2f%% sd=%.0f", m_symbol, riskPct, stopDistPoints));
+         return 0;
+        }
+
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      double askPx = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+      double bidPx = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      double openPx = (direction == 1) ? askPx : bidPx;
+      double slDist = stopDistPoints * point;
+      double sl     = (direction == 1) ? (openPx - slDist) : (openPx + slDist);
+
+      ulong tk = (direction == 1)
+         ? m_trade.Buy(m_symbol, lots, sl, 0.0, reason, detail)
+         : m_trade.Sell(m_symbol, lots, sl, 0.0, reason, detail);
+      if(tk == 0)
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · order failed · dir=%d lots=%.2f", m_symbol, direction, lots));
+         return 0;
+        }
+
+      int slot = FindFreeSlot();
+      if(slot < 0)
+        {
+         OmegaLogger::LogException("POSITIONS", -2, "No free slot for new position");
+         //-- still record on broker, but lose tracking. Rare.
+         return tk;
+        }
+      m_pos[slot].Reset();
+      m_pos[slot].ticket         = tk;
+      m_pos[slot].campaignId     = campaignId;
+      m_pos[slot].symbol         = m_symbol;
+      m_pos[slot].role           = role;
+      m_pos[slot].direction      = direction;
+      m_pos[slot].alive          = true;
+      m_pos[slot].isPaper        = (m_trade.Mode() != OMEGA_MODE_AUTONOMOUS);
+      m_pos[slot].openPrice      = openPx;
+      m_pos[slot].openVolume     = lots;
+      m_pos[slot].currentVolume  = lots;
+      m_pos[slot].initialSL      = sl;
+      m_pos[slot].currentSL      = sl;
+      m_pos[slot].opened         = TimeCurrent();
+      OmegaLogger::LogInfo("POSITIONS",
+         StringFormat("OPEN · %s · risk=%.2f%% · %s",
+                       PositionRoleStr::ToString(role), riskPct,
+                       m_pos[slot].Snapshot()));
+      return tk;
+     }
+
+   //=== Close one ticket ===========================================
+   bool Close(ulong ticket, ENUM_OMEGA_REASON reason, string detail)
+     {
+      int idx = IndexOfTicket(ticket);
+      if(idx < 0)
+        {
+         //-- not tracked — still try to close for safety
+         return m_trade.Close(ticket, reason, detail);
+        }
+      bool ok = m_trade.Close(ticket, reason, detail);
+      if(ok)
+        {
+         m_pos[idx].alive       = false;
+         m_pos[idx].closed      = TimeCurrent();
+         m_pos[idx].closeReason = reason;
+         OmegaLogger::LogInfo("POSITIONS",
+            StringFormat("CLOSE · %s · %s",
+                          OmegaStr::ReasonToString(reason), m_pos[idx].Snapshot()));
+        }
+      return ok;
+     }
+
+   //=== Close all positions matching direction (0 = any) ===========
+   int CloseAll(int direction, ENUM_OMEGA_REASON reason, string detail)
+     {
+      int n = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         if(direction != 0 && m_pos[i].direction != direction) continue;
+         if(Close(m_pos[i].ticket, reason, detail)) n++;
+        }
+      return n;
+     }
+
+   //=== Reduce (partial close) =====================================
+   //   Closes the OLDEST profitable same-direction position. Phase 5
+   //   simplification — full partial-volume reduction lands in 5.1.
+   bool ReduceOldest(int direction, ENUM_OMEGA_REASON reason, string detail)
+     {
+      int target = -1;
+      datetime oldest = D'2099.01.01';
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         if(m_pos[i].direction != direction) continue;
+         if(m_pos[i].opened < oldest)
+           {
+            oldest = m_pos[i].opened;
+            target = i;
+           }
+        }
+      if(target < 0) return false;
+      return Close(m_pos[target].ticket, reason, detail);
+     }
+
+   //=== Trailing SL ================================================
+   //   Per closed bar: bump current SL up tiers as MFE crosses 1R / 2R / 3R.
+   //   Tier 0 = initial; Tier 1 = breakeven; Tier 2 = +1R; Tier 3 = +2R.
+   void TrailStops()
+     {
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      if(point <= 0) return;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         double openPx  = m_pos[i].openPrice;
+         double initSL  = m_pos[i].initialSL;
+         double slDist  = MathAbs(openPx - initSL);
+         if(slDist <= 0) continue;
+         double mfePts  = m_pos[i].maxFavorablePts;
+         double rUnit   = slDist / point;        // 1R distance in points
+         double newSL   = m_pos[i].currentSL;
+         int    tier    = m_pos[i].trailTier;
+
+         //-- tier 1 — breakeven once MFE >= 1R
+         if(tier < 1 && mfePts >= rUnit)
+           {
+            newSL = openPx;
+            tier  = 1;
+           }
+         //-- tier 2 — +1R once MFE >= 2R
+         if(tier < 2 && mfePts >= 2.0 * rUnit)
+           {
+            newSL = (m_pos[i].direction == 1) ? (openPx + slDist) : (openPx - slDist);
+            tier  = 2;
+           }
+         //-- tier 3 — +2R once MFE >= 3R
+         if(tier < 3 && mfePts >= 3.0 * rUnit)
+           {
+            newSL = (m_pos[i].direction == 1) ? (openPx + 2.0 * slDist) : (openPx - 2.0 * slDist);
+            tier  = 3;
+           }
+         if(tier > m_pos[i].trailTier
+            && MathAbs(newSL - m_pos[i].currentSL) > point * 5)
+           {
+            if(m_trade.ModifySLTP(m_pos[i].ticket, newSL, 0.0, REASON_HEALTHY_CONTINUATION,
+                  StringFormat("trail tier %d -> %d MFE=%.0f", m_pos[i].trailTier, tier, mfePts)))
+              {
+               m_pos[i].currentSL  = newSL;
+               m_pos[i].trailTier  = tier;
+              }
+           }
+        }
+     }
+
+   //=== Per-tick excursion update ==================================
+   void TickUpdate()
+     {
+      double bid = SymbolInfoDouble(m_symbol, SYMBOL_BID);
+      double ask = SymbolInfoDouble(m_symbol, SYMBOL_ASK);
+      for(int i = 0; i < m_count; i++)
+         if(m_pos[i].alive) m_pos[i].TickExcursion(bid, ask);
+     }
+
+   //=== Per closed bar: trail + housekeeping =======================
+   void BarUpdate(const OmegaState &state, OmegaCurve &curve)
+     {
+      TrailStops();
+     }
+
+   //=== Snapshot ===================================================
+   string Snapshot() const
+     {
+      int alive = 0, longs = 0, shorts = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(!m_pos[i].alive) continue;
+         alive++;
+         if(m_pos[i].direction == 1)  longs++;
+         if(m_pos[i].direction == -1) shorts++;
+        }
+      return StringFormat("alive=%d (L=%d S=%d) total=%d riskOpen=%.2f",
+                          alive, longs, shorts, m_count, TotalRisk());
+     }
+
+   //=== Read-only access ============================================
+   int Count() const { return m_count; }
+   const OmegaPosition* At(int i) const
+     {
+      if(i < 0 || i >= m_count) return NULL;
+      return GetPointer(m_pos[i]);
+     }
+  };
+
+#endif // __OMEGA_CAMPAIGN_POSITIONS_MQH__
+
+//==================================================================
+//= MODULE: Position/DecisionEngine
+//= Source: Include/Position/DecisionEngine.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                              DecisionEngine.mqh  |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 13/15 — the engine where Trinity becomes ACTION.         |
+//|                                                                  |
+//|   Pure function. Reads the Trinity, the curve+tree, the story,   |
+//|   and the current campaign positions. Emits a single decision    |
+//|   plus the reason code, role, direction, and stop distance.      |
+//|                                                                  |
+//|   Decisions are CONSEQUENCES of state, not signals. The truth    |
+//|   table:                                                         |
+//|                                                                  |
+//|     not primed                              → OBSERVE             |
+//|     life ≤ 32 (DEAD)  & holding same dir    → EXIT                |
+//|     life ≤ 32         & confidence ≥ 50     → REVERSE (counter)   |
+//|     life ≤ 32         & owner != held       → OBSERVE             |
+//|     life weakening    & holding profitably  → REDUCE              |
+//|     life weakening    & holding             → HOLD                |
+//|     life holding      & no position         → ENTER (normal risk) |
+//|     life alive        & no position         → ENTER (origin role) |
+//|     life alive        & progressing & budget→ ADD   (progress role)|
+//|     life alive        & at full budget      → HOLD                |
+//|                                                                  |
+//|   Origin entries require min trinity AND alignment ≥ 4/6.        |
+//|   Progress adds require progressing + same dir.                  |
+//|   Reversal requires confidence ≥ 50 AND owner direction defined. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_DECISION_ENGINE_MQH__
+#define __OMEGA_DECISION_ENGINE_MQH__
+
+
+//=== Decision result ================================================
+struct DecisionResult
+  {
+   ENUM_OMEGA_DECISION decision;
+   ENUM_OMEGA_REASON   reason;
+   ENUM_POSITION_ROLE  suggestedRole;
+   int                 suggestedDirection;
+   double              stopDistPoints;
+   string              detail;
+
+                     DecisionResult()
+     {
+      decision           = OMEGA_DEC_OBSERVE;
+      reason             = REASON_PHASE_NOT_BUILT;
+      suggestedRole      = POS_ENTRY;
+      suggestedDirection = 0;
+      stopDistPoints     = 0;
+      detail             = "";
+     }
+  };
+
+//=== Tunables (sane defaults; later phases tune from CampaignDB) ===
+struct DecisionParams
+  {
+   double  enterMinLife;      // 45 — life threshold to enter
+   double  enterMinStability; // 45
+   double  enterMinConf;      // 40
+   double  attackMinLife;     // 60 — life threshold for ALIVE entries
+   double  attackMinStab;     // 60
+   double  attackMinConf;     // 55
+   double  reverseMinConf;    // 50 — confidence to flip on dead
+   int     enterMinAlign;     // 4 — alignment count required
+   int     maxBudget;         // 4 — max positions per campaign
+   double  defaultSlAtrMult;  // 1.5 — fallback SL when no protective extreme
+   double  reduceLifeFloor;   // 38 — life below this triggers REDUCE if profitable
+
+                     DecisionParams()
+     {
+      enterMinLife = 45.0; enterMinStability = 45.0; enterMinConf = 40.0;
+      attackMinLife = 60.0; attackMinStab = 60.0; attackMinConf = 55.0;
+      reverseMinConf = 50.0;
+      enterMinAlign = 4;
+      maxBudget = 4;
+      defaultSlAtrMult = 1.5;
+      reduceLifeFloor = 38.0;
+     }
+  };
+
+//=== The decision engine ===========================================
+class DecisionEngine
+  {
+public:
+   //--- Compute stop distance in POINTS from chart-TF curve state.
+   //    Prefers the protective extreme (owner curve origin) if available,
+   //    else falls back to ATR multiple. Returns 0 if no valid stop.
+   static double ComputeStopDistPoints(string sym, OmegaCurve &curve, int direction,
+                                        const DecisionParams &p)
+     {
+      CurveState *chart = curve.ChartTfState();
+      if(chart == NULL) return 0.0;
+      double atr   = chart.physics.atr;
+      double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+      if(atr <= 0 || point <= 0) return 0.0;
+
+      double bar1Close = iClose(sym, chart.tf, 0);
+      if(bar1Close <= 0) bar1Close = iClose(sym, chart.tf, 1);
+
+      //-- prefer owner curve origin
+      int idx = curve.tree.ownerIndex;
+      if(idx >= 0)
+        {
+         double protectivePx = curve.tree.tree[idx].origin;
+         if(protectivePx > 0 && curve.tree.tree[idx].dir == direction)
+           {
+            double dist = MathAbs(bar1Close - protectivePx);
+            //-- pad by ~0.3*ATR so we don't sit on the level
+            dist += atr * 0.3;
+            if(dist > 0) return dist / point;
+           }
+        }
+      //-- fallback: ATR * multiplier
+      return (atr * p.defaultSlAtrMult) / point;
+     }
+
+   //--- Main decision dispatcher.
+   static DecisionResult Decide(const OmegaState &state,
+                                 OmegaCurve &curve,
+                                 const OmegaStory &story,
+                                 int activeSameDirCount,
+                                 int activeCounterCount,
+                                 const DecisionParams &p)
+     {
+      DecisionResult r;
+
+      //--- 1. Phase / readiness gates
+      if(!state.primed)
+        {
+         r.decision = OMEGA_DEC_OBSERVE;
+         r.reason   = REASON_PHASE_NOT_BUILT;
+         r.detail   = "engine not perceiving yet";
+         return r;
+        }
+
+      int ownerDir = curve.tree.ownerDir;
+      if(ownerDir == 0)
+        {
+         r.decision = OMEGA_DEC_OBSERVE;
+         r.reason   = REASON_OWNERSHIP_LEAKING;
+         r.detail   = "no dominant curve owner";
+         return r;
+        }
+
+      //--- 2. Verdict bucketing
+      ENUM_LIFE_VERDICT verdict = LifeScore::Verdict(state.life);
+      r.suggestedDirection = ownerDir;
+      r.stopDistPoints     = ComputeStopDistPoints(state.supporting.regime > 0 ? "" : "",
+                                                    curve, ownerDir, p);
+      //-- the empty string above is just a placeholder; real symbol resolved in Execution
+      //   Re-compute properly using actual symbol when called from EA.
+
+      //--- 3. DEAD: holding wrong side / flip-or-flat
+      if(verdict == LIFE_DEAD)
+        {
+         if(activeSameDirCount > 0)
+           {
+            r.decision = OMEGA_DEC_EXIT;
+            r.reason   = REASON_LIFE_DEAD;
+            r.detail   = StringFormat("life %.1f dead, exit %d position(s)",
+                                       state.life, activeSameDirCount);
+            return r;
+           }
+         if(state.confidence >= p.reverseMinConf && activeCounterCount == 0)
+           {
+            r.decision           = OMEGA_DEC_REVERSE;
+            r.reason             = REASON_OWNERSHIP_TRANSFER;
+            r.suggestedDirection = -ownerDir;
+            r.suggestedRole      = POS_ORIGIN;
+            r.detail             = StringFormat("life dead, conf %.0f -> flip to %s",
+                                                state.confidence, (-ownerDir == 1 ? "LONG" : "SHORT"));
+            return r;
+           }
+         r.decision = OMEGA_DEC_OBSERVE;
+         r.reason   = REASON_LIFE_DEAD;
+         r.detail   = "dead but conf too low to flip";
+         return r;
+        }
+
+      //--- 4. WEAKENING: reduce profitable, else hold
+      if(verdict == LIFE_WEAKENING)
+        {
+         if(activeSameDirCount > 0 && state.life < p.reduceLifeFloor && !story.progressing)
+           {
+            r.decision = OMEGA_DEC_REDUCE;
+            r.reason   = REASON_LIFE_WEAKENING;
+            r.detail   = StringFormat("life %.1f weakening, reduce while profitable", state.life);
+            return r;
+           }
+         if(activeSameDirCount > 0)
+           {
+            r.decision = OMEGA_DEC_HOLD;
+            r.reason   = REASON_LIFE_WEAKENING;
+            r.detail   = StringFormat("life %.1f weakening, hold", state.life);
+            return r;
+           }
+         r.decision = OMEGA_DEC_OBSERVE;
+         r.reason   = REASON_LIFE_WEAKENING;
+         r.detail   = "weakening, no entry";
+         return r;
+        }
+
+      //--- 5. HOLDING / ALIVE: entries and adds
+      bool aligned = (state.supporting.alignment >= (p.enterMinAlign / 6.0) * 100.0);
+
+      if(verdict == LIFE_HOLDING)
+        {
+         if(activeSameDirCount == 0)
+           {
+            if(state.confidence >= p.enterMinConf
+               && state.stability >= p.enterMinStability
+               && aligned)
+              {
+               r.decision      = OMEGA_DEC_ENTER_LONG;
+               if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
+               r.reason        = REASON_HEALTHY_CONTINUATION;
+               r.suggestedRole = POS_ORIGIN;
+               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f align %.0f%% — origin entry",
+                                              state.life, state.stability, state.confidence,
+                                              state.supporting.alignment);
+               return r;
+              }
+            r.decision = OMEGA_DEC_OBSERVE;
+            r.reason   = REASON_NARRATIVE_DIVERGE;
+            r.detail   = "holding but stability/conf/alignment below entry";
+            return r;
+           }
+         r.decision = OMEGA_DEC_HOLD;
+         r.reason   = REASON_LIFE_HEALTHY;
+         r.detail   = "holding, position open";
+         return r;
+        }
+
+      // verdict == ALIVE
+      if(activeSameDirCount == 0)
+        {
+         if(state.confidence >= p.attackMinConf
+            && state.stability >= p.attackMinStab
+            && aligned)
+           {
+            r.decision      = OMEGA_DEC_ENTER_LONG;
+            if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
+            r.reason        = REASON_HEALTHY_CONTINUATION;
+            r.suggestedRole = POS_ORIGIN;
+            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f align %.0f%% — origin entry (strong)",
+                                            state.life, state.stability, state.confidence,
+                                            state.supporting.alignment);
+            return r;
+           }
+         //-- alive but conditions for full attack not met → demote to normal entry
+         if(state.stability >= p.enterMinStability
+            && state.confidence >= p.enterMinConf
+            && aligned)
+           {
+            r.decision = (ownerDir == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
+            r.reason   = REASON_HEALTHY_CONTINUATION;
+            r.suggestedRole = POS_ORIGIN;
+            r.detail = "alive but support conditions soft — origin entry (normal)";
+            return r;
+           }
+         r.decision = OMEGA_DEC_OBSERVE;
+         r.reason   = REASON_NARRATIVE_DIVERGE;
+         r.detail   = "alive but stability/conf/alignment below threshold";
+         return r;
+        }
+
+      //-- already in: pyramiding logic
+      int totalSameDir = activeSameDirCount;
+      if(totalSameDir < p.maxBudget && story.progressing)
+        {
+         r.decision      = OMEGA_DEC_ADD;
+         r.reason        = REASON_HEALTHY_CONTINUATION;
+         r.suggestedRole = POS_PROGRESS;
+         r.detail        = StringFormat("ALIVE + progressing, %d/%d budget — pyramid add",
+                                         totalSameDir + 1, p.maxBudget);
+         return r;
+        }
+      r.decision = OMEGA_DEC_HOLD;
+      r.reason   = REASON_LIFE_HEALTHY;
+      r.detail   = (totalSameDir >= p.maxBudget) ? "at budget" : "alive, waiting for progression";
+      return r;
+     }
+  };
+
+#endif // __OMEGA_DECISION_ENGINE_MQH__
+
+//==================================================================
+//= MODULE: Execution
+//= Source: Include/Execution.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    Execution.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer-15 surface. Receives a (decision, reason, state) triple, |
+//|   gates it through Capital state, and routes it to the           |
+//|   CampaignPositions manager for actual order plumbing.           |
+//|                                                                  |
+//|   Phase 5 wires real entries:                                    |
+//|     ENTER_LONG / ENTER_SHORT / ADD  → CampaignPositions::Open    |
+//|     EXIT                            → CampaignPositions::CloseAll|
+//|     REVERSE                         → CloseAll(same)+Open(opp)   |
+//|     REDUCE                          → ReduceOldest                |
+//|     OBSERVE / HOLD                  → log only                   |
+//|                                                                  |
+//|   The Capital state machine still gates entries (RESTRICTED      |
+//|   suppresses new entries; SUSPENDED suppresses everything).      |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_EXECUTION_MQH__
+#define __OMEGA_EXECUTION_MQH__
+
+
+class OmegaExecution
+  {
+private:
+   OmegaPaperTrade     m_trade;
+   OmegaCapital       *m_capital;
+   OmegaRisk          *m_risk;
+   CampaignDB         *m_db;
+   CampaignPositions  *m_positions;
+
+public:
+                     OmegaExecution()
+     {
+      m_capital   = NULL;
+      m_risk      = NULL;
+      m_db        = NULL;
+      m_positions = NULL;
+     }
+
+   void Init(ENUM_OMEGA_MODE mode, ulong magic,
+             OmegaCapital *capital, OmegaRisk *risk, CampaignDB *db,
+             CampaignPositions *positions = NULL)
+     {
+      m_trade.Init(mode, magic);
+      m_capital   = capital;
+      m_risk      = risk;
+      m_db        = db;
+      m_positions = positions;
+      OmegaLogger::LogInfo("EXEC", "Initialized");
+     }
+
+   //--- Late-bind the position manager (avoids constructor circular dep)
+   void SetPositions(CampaignPositions *positions) { m_positions = positions; }
+
+   //--- expose the trade shell so CampaignPositions can share it
+   OmegaPaperTrade* TradeShell() { return GetPointer(m_trade); }
+   void SetMode(ENUM_OMEGA_MODE mode) { m_trade.SetMode(mode); }
+   ENUM_OMEGA_MODE Mode() const       { return m_trade.Mode(); }
+
+   //--- The single decision-handling entry point. Logs every decision,
+   //    gates by capital state, then routes to CampaignPositions.
+   void HandleDecision(string symbol, ENUM_OMEGA_DECISION dec, ENUM_OMEGA_REASON reason,
+                        const OmegaState &state, double stopDistPts, string detail,
+                        ENUM_POSITION_ROLE role = POS_ENTRY,
+                        int suggestedDir = 0,
+                        long campaignId = 0)
+     {
+      OmegaLogger::LogDecision(symbol, m_trade.Mode(), dec, reason,
+                                state.life, state.stability, state.confidence, detail);
+      if(dec == OMEGA_DEC_OBSERVE || dec == OMEGA_DEC_HOLD) return;
+
+      //--- Capital gate
+      if(m_capital == NULL)
+        {
+         OmegaLogger::LogException("EXEC", -1, "Capital not wired");
+         return;
+        }
+      ENUM_OMEGA_CAPITAL_STATE cs = m_capital.State();
+      if(cs == CAPITAL_SUSPENDED)
+        {
+         OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
+                                   REASON_HARD_LIMIT,
+                                   state.life, state.stability, state.confidence,
+                                   "Capital SUSPENDED — decision suppressed");
+         return;
+        }
+      bool isEntryDec = (dec == OMEGA_DEC_ENTER_LONG ||
+                         dec == OMEGA_DEC_ENTER_SHORT ||
+                         dec == OMEGA_DEC_ADD ||
+                         dec == OMEGA_DEC_REVERSE);
+      if(cs == CAPITAL_RESTRICTED && isEntryDec)
+        {
+         OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
+                                   REASON_DAILY_LIMIT,
+                                   state.life, state.stability, state.confidence,
+                                   "Capital RESTRICTED — entry suppressed (managing only)");
+         return;
+        }
+
+      if(m_positions == NULL)
+        {
+         OmegaLogger::LogException("EXEC", -2, "Positions not wired");
+         return;
+        }
+      if(stopDistPts <= 0 && isEntryDec)
+        {
+         OmegaLogger::LogWarning("EXEC",
+            StringFormat("%s · %s · invalid stopDistPts %.0f — skipped",
+                          symbol, OmegaStr::DecisionToString(dec), stopDistPts));
+         return;
+        }
+
+      switch(dec)
+        {
+         case OMEGA_DEC_ENTER_LONG:
+            m_positions.Open(+1, role, stopDistPts, campaignId, reason, detail, state);
+            break;
+         case OMEGA_DEC_ENTER_SHORT:
+            m_positions.Open(-1, role, stopDistPts, campaignId, reason, detail, state);
+            break;
+         case OMEGA_DEC_ADD:
+            if(suggestedDir == 0) suggestedDir = +1;
+            m_positions.Open(suggestedDir, role, stopDistPts, campaignId, reason, detail, state);
+            break;
+         case OMEGA_DEC_REVERSE:
+           {
+            int oldDir = -suggestedDir;     // counter side currently held
+            m_positions.CloseAll(oldDir, REASON_OWNERSHIP_TRANSFER,
+                                  "REVERSE: closing prior side before flip");
+            m_positions.Open(suggestedDir, POS_ORIGIN, stopDistPts, campaignId,
+                              reason, "REVERSE: flipped to counter", state);
+            break;
+           }
+         case OMEGA_DEC_EXIT:
+            m_positions.CloseAll(suggestedDir, reason, detail);
+            break;
+         case OMEGA_DEC_REDUCE:
+            if(suggestedDir == 0) suggestedDir = +1;
+            m_positions.ReduceOldest(suggestedDir, reason, detail);
+            break;
+         case OMEGA_DEC_TRANSFER:
+            //-- TRANSFER mirrors REVERSE today; Phase 6 will distinguish
+            //   gradual hand-offs (transfer) from hard flips (reverse).
+           {
+            int oldDirT = -suggestedDir;
+            m_positions.CloseAll(oldDirT, REASON_OWNERSHIP_TRANSFER, detail);
+            m_positions.Open(suggestedDir, POS_ORIGIN, stopDistPts, campaignId,
+                              reason, detail, state);
+            break;
+           }
+         default:
+            break;
+        }
+     }
+  };
+
+#endif // __OMEGA_EXECUTION_MQH__
+
+//==================================================================
 //= MAIN EA BODY (inputs · globals · OnInit/Tick/Timer/Deinit)
 //= Source: EA.mq5
 //==================================================================
@@ -4047,13 +4847,15 @@ input double              InpImpulseMult      = 1.5;                  // Impulse
 input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
 
 //================== GLOBALS =========================================
-OmegaState     g_state;
-OmegaCapital   g_capital;
-OmegaRisk      g_risk;
-CampaignDB     g_db;
-OmegaExecution g_exec;
-OmegaCurve     g_curve;        // Phase 2: multi-TF perception
-OmegaStory     g_story;        // Phase 4: narrative engine
+OmegaState        g_state;
+OmegaCapital      g_capital;
+OmegaRisk         g_risk;
+CampaignDB        g_db;
+CampaignPositions g_positions;   // Phase 5: campaign-aware position manager
+OmegaExecution    g_exec;
+OmegaCurve        g_curve;       // Phase 2: multi-TF perception
+OmegaStory        g_story;       // Phase 4: narrative engine
+DecisionParams    g_dparams;     // Phase 5: decision tunables
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 
@@ -4083,8 +4885,14 @@ int OnInit()
 //--- 5. Campaign memory
    g_db.Init();
 
-//--- 6. Execution shell
+//--- 6. Execution shell + Position manager (Phase 5).
+//    Init order: exec first (creates trade shell), then positions
+//    (uses exec.TradeShell()), then exec.SetPositions(...) wires the
+//    decision-handling path to the position manager.
    g_exec.Init(InpMode, InpMagic, GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
+   g_positions.Init(_Symbol, InpMagic, g_exec.TradeShell(),
+                     GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
+   g_exec.SetPositions(GetPointer(g_positions));
 
 //--- 7. Perception (Phase 2): multi-TF curve engine.
    if(!g_curve.Init(_Symbol, (ENUM_TIMEFRAMES)_Period,
@@ -4143,9 +4951,33 @@ void OnTick()
       g_state.primed = g_curve.primed;
       //--- Phase 4: narrative reads curve+tree and writes life/stability/
       //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
-      g_story.Update(g_state, g_curve);
+      bool storyAdvanced = g_story.Update(g_state, g_curve);
+      g_state.DeriveTrinity();
+
+      //--- Phase 5: each closed bar, ask the decision engine, route the
+      //    answer through Execution → CampaignPositions, then trail stops.
+      if(storyAdvanced)
+        {
+         int activeSame    = g_positions.CountActive(g_curve.tree.ownerDir);
+         int activeCounter = g_positions.CountActive(-g_curve.tree.ownerDir);
+         DecisionResult dr = DecisionEngine::Decide(g_state, g_curve, g_story,
+                                                     activeSame, activeCounter, g_dparams);
+         //-- the engine left stopDistPoints as a placeholder; recompute with real symbol
+         dr.stopDistPoints = DecisionEngine::ComputeStopDistPoints(_Symbol, g_curve,
+                              dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir,
+                              g_dparams);
+         long campaignId = (g_curve.tree.ownerIndex >= 0)
+                            ? g_curve.tree.tree[g_curve.tree.ownerIndex].id : 0;
+         g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
+                                dr.stopDistPoints, dr.detail,
+                                dr.suggestedRole, dr.suggestedDirection, campaignId);
+         g_positions.BarUpdate(g_state, g_curve);
+        }
      }
-   g_state.DeriveTrinity();
+   else g_state.DeriveTrinity();
+
+   //-- per-tick: update MFE/MAE on every position
+   g_positions.TickUpdate();
   }
 
 //+------------------------------------------------------------------+
@@ -4159,7 +4991,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s]",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -4170,7 +5002,8 @@ void OnTimer()
          OmegaNews::Environment(),
          g_state.Snapshot(),
          g_curve.Snapshot(),
-         g_story.Snapshot()));
+         g_story.Snapshot(),
+         g_positions.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

@@ -59,42 +59,44 @@ public:
      }
    ENUM_OMEGA_MODE Mode() const { return m_mode; }
 
-   //--- BUY
-   bool Buy(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
+   //--- BUY → returns broker ticket (or paper ticket); 0 = failure
+   ulong Buy(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
      {
       double price = SymbolInfoDouble(symbol, SYMBOL_ASK);
       if(LiveMode())
         {
          bool ok = m_trade.Buy(lots, symbol, price, sl, tp, detail);
-         OmegaLogger::LogExecution(symbol, "BUY", m_trade.ResultOrder(),
+         ulong tk = m_trade.ResultOrder();
+         OmegaLogger::LogExecution(symbol, "BUY", tk,
                                     m_trade.ResultPrice(), lots, reason,
             StringFormat("live=%s ret=%u %s", ok?"true":"false",
                          m_trade.ResultRetcode(), detail));
-         return ok;
+         return ok ? tk : 0;
         }
       ulong ticket = ++m_paperTicket;
       OmegaLogger::LogExecution(symbol, "BUY-PAPER", ticket, price, lots, reason,
          StringFormat("sl=%.5f tp=%.5f %s", sl, tp, detail));
-      return true;
+      return ticket;
      }
 
-   //--- SELL
-   bool Sell(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
+   //--- SELL → returns broker ticket (or paper ticket); 0 = failure
+   ulong Sell(string symbol, double lots, double sl, double tp, ENUM_OMEGA_REASON reason, string detail)
      {
       double price = SymbolInfoDouble(symbol, SYMBOL_BID);
       if(LiveMode())
         {
          bool ok = m_trade.Sell(lots, symbol, price, sl, tp, detail);
-         OmegaLogger::LogExecution(symbol, "SELL", m_trade.ResultOrder(),
+         ulong tk = m_trade.ResultOrder();
+         OmegaLogger::LogExecution(symbol, "SELL", tk,
                                     m_trade.ResultPrice(), lots, reason,
             StringFormat("live=%s ret=%u %s", ok?"true":"false",
                          m_trade.ResultRetcode(), detail));
-         return ok;
+         return ok ? tk : 0;
         }
       ulong ticket = ++m_paperTicket;
       OmegaLogger::LogExecution(symbol, "SELL-PAPER", ticket, price, lots, reason,
          StringFormat("sl=%.5f tp=%.5f %s", sl, tp, detail));
-      return true;
+      return ticket;
      }
 
    //--- CLOSE
