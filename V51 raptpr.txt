@@ -2215,14 +2215,6 @@ if barstate.islast
 
     gMaster := master
     gConflict := conflict
-    gAction := action
-
-    // ── Story / Language engine (energy terms, led by the wave narrative) ────
-    string _rL = resCode == 2 ? "The process has RESOLVED — energy cleaned." : resCode == 1 ? "Process PARTIALLY resolved — cleaning incomplete." : "Primary structure UNRESOLVED — energy uncleaned."
-    string _aL = attractor >= 60 ? "A strong unresolved attractor is pulling price." : attractor >= 35 ? "A moderate attractor is active." : "No dominant attractor."
-    string _nL = "Network: " + str.tostring(_eligN) + " live structures, " + (pdir == master and master != 0 ? "agreeing." : pdir != 0 and pdir != master ? "opposing." : "neutral.")
-    string _tL = threat < 25 ? "Threat low." : threat < 55 ? "Threat moderate." : "Threat high."
-    string story = waveNarr + " " + _rL + " " + _aL + " " + _nL + " " + _tL
 
     string matters = ""
     matters := matters + (attractor >= 50 ? "Primary attractor · " : "")
@@ -2230,11 +2222,6 @@ if barstate.islast
     matters := matters + (resCode == 0 ? "Unresolved structure · " : "")
     matters := matters + (_eligN >= 18 ? "Network conversation · " : "")
     matters := matters == "" ? "• Awaiting a dominant structure" : "• " + str.replace_all(matters, " · ", "\n• ")
-    string nomatter = ""
-    nomatter := nomatter + (resCode == 2 ? "Completed structure · " : "")
-    nomatter := nomatter + (threat < 22 ? "Reversal threat · " : "")
-    nomatter := nomatter + (conflict < 18 ? "Minor pullback · " : "")
-    nomatter := nomatter == "" ? "—" : "• " + str.replace_all(nomatter, " · ", "\n• ")
 
     array<int> _fwd = f_pathNodes(true)
     int _nextIdx = array.size(_fwd) > 0 ? array.get(_fwd, 0) : -1
@@ -2619,7 +2606,7 @@ if barstate.islast and showTree
         array.push(tree_lines, line.new(bar_index, close, _budX, _budTgt, color = color.new(_budCol, 0), width = 3, style = line.style_arrow_right))
         int _lnB = f_lane(_occY, _budTgt, _gap)
         float _budAtr = math.abs(_budTgt - close) / math.max(atr, 1e-10)
-        string _budTx = "▶ CURVE BUDGET TGT · " + _budSrc + "  " + str.tostring(math.round_to_mintick(_budTgt)) + "   " + str.tostring(_treeDepth) + "/" + str.tostring(_curveBudgetDepth) + " curves · " + str.tostring(math.round(_budAtr * 10) / 10) + " ATR"
+        string _budTx = "▶ BUDGET TGT · " + _budSrc + "  " + str.tostring(math.round_to_mintick(_budTgt)) + "   " + str.tostring(_treeDepth) + "/" + str.tostring(_curveBudgetDepth) + " · " + str.tostring(math.round(_budAtr * 10) / 10) + " ATR"
         array.push(tree_lbls, label.new(_budX + _lnB * 9, _budTgt, _budTx, style = label.style_label_left, color = color.new(_budCol, 8), textcolor = #0a0e27, size = size.normal))
 
 // ── Alerts (global scope) ─────────────────────────────────────────────────────
