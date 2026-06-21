@@ -37,6 +37,7 @@ bool   showParticipants = input.bool(true, "Show Participant interference zones 
 bool   showCurve   = input.bool(true, "Show Curve object — energy state (F72 foundation, middle-right)", group = GRP)
 bool   showTree    = input.bool(true, "Plot CURVE TREE on chart (live curves · origin→extreme · emergent phase)", group = GRP)
 string curveCtx    = input.string("Chart wave", "Curve TREE root anchor", options = ["Chart wave", "Higher TF", "Highest TF"], tooltip = "Which curve the tree tracks. 'Chart wave' = the chart timeframe's own curve (recommended — the MTF map already shows higher-timeframe context). 'Higher/Highest TF' climb the timeframe ladder. The panel header shows the actual resolved timeframe.", group = GRP)
+bool   phaseFromNode = input.bool(true, "Phase label driven by curve NODE (emergent) — off = legacy machine", group = GRP, tooltip = "ON: the on-chart phase regions + readout follow the curve tree's emergent node.state (1-bar settle, debounced). OFF: the legacy Engine-1A machine phase drives the label.")
 int    minConf     = input.int  (55,  "Min confidence to ATTACK",     group = GRP, minval = 0, maxval = 100)
 int    pivLen      = input.int  (8,   "Wave pivot length",            group = GRP, minval = 2, maxval = 50)
 bool   showRegions = input.bool (true, "Show phase REGION labels",    group = GRP)
@@ -812,6 +813,10 @@ if liqg_active and (not _liqgInWindow or (liqg_objArrival and liqg_trueCHoCH))
 //    liquidation-wave TITLE are informational only and surface separately via
 //    displaySub — they NEVER replace or rename the canonical phase.
 string currentDisplayPhase = ie1a_currentPhase
+// node-driven phase authority (assigned after the F72 curve-tree engine runs; read
+// here with a 1-bar settle by the region renderer / readout when phaseFromNode is on)
+var string gNodePhase = ""
+string f_phaseLabel() => (phaseFromNode and gNodePhase != "" and gNodePhase != "—") ? gNodePhase : currentDisplayPhase
 string displaySub = (str.contains(ie1a_currentPhase, "Liquidity") and liqg_active and liqg_subPhase != "") ? ("State: " + liqg_subPhase + (na(liqg_distPct) ? "" : "   Dist " + str.tostring(math.round(liqg_distPct)) + "%") + "   Arr " + (liqg_objArrival ? "Yes" : (not na(liqg_distPct) and liqg_distPct < 12) ? "Soon" : "No")) : str.contains(ie1a_currentPhase, "Absorption") ? ("Cycle " + str.tostring(entryCycle) + "   Res " + str.tostring(math.round(100.0 - re_residualEnergyScore)) + "%") : ""
 string _cdpDir   = displayWaveDir_M5 == 1 ? "Bullish" : displayWaveDir_M5 == -1 ? "Bearish" : "Neutral"
 string liqg_arrTx = liqg_objArrival ? "Yes" : (not na(liqg_distPct) and liqg_distPct < 12) ? "Imminent" : "No"
@@ -1125,9 +1130,9 @@ int    stackDir  = fractalStackDir
 float  stackPct  = fractalStackScore
 float  waveOrigin = se5_inv
 float  waveObj    = nz(liqg_target, se5_tgt)
-string wavePhase  = currentDisplayPhase
+string wavePhase  = f_phaseLabel()
 string waveDirLbl = waveDir == 1 ? "Bullish" : waveDir == -1 ? "Bearish" : "Neutral"
-string waveNarr   = _cdpDir + " wave · " + str.tostring(math.round(waveProgress)) + "% → " + (na(waveObj) ? "forming" : str.tostring(math.round_to_mintick(waveObj))) + " · " + currentDisplayPhase + "."
+string waveNarr   = _cdpDir + " wave · " + str.tostring(math.round(waveProgress)) + "% → " + (na(waveObj) ? "forming" : str.tostring(math.round_to_mintick(waveObj))) + " · " + f_phaseLabel() + "."
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ATTACK SEQUENCE — execution checklist (entry · stop · target), tracked every bar.
@@ -1230,7 +1235,7 @@ var box    _regLiveBox = na
 var label  _regLiveLbl = na
 
 if showRegions and barstate.isconfirmed
-    string _now = currentDisplayPhase
+    string _now = f_phaseLabel()
     if _regPhase == ""
         _regPhase := _now
         _regStart := bar_index
@@ -1549,6 +1554,8 @@ int   _ownDepthT = _ownF >= 0 ? array.get(_tree, _ownF).depth  : 0
 float _ownNrgT   = _ownF >= 0 ? array.get(_tree, _ownF).energy : 0.0
 // F72 step 1: the phase the OWNING curve emits — derived from the node, not a machine
 string _ownState = _ownF >= 0 ? array.get(_tree, _ownF).state : "—"
+// publish the emergent node phase as the authority the on-chart label can follow
+gNodePhase := _ownState
 int    _ownSrc   = _ownF >= 0 ? array.get(_tree, _ownF).srcTf : 5
 float  _ownOrig  = _ownSrc == 6 ? se240_inv : _ownSrc == 5 ? se60_inv : se5_inv
 float  _ownExt   = _ownSrc == 6 ? (_ownDirT == 1 ? se240_sh : se240_sl) : _ownSrc == 5 ? (_ownDirT == 1 ? se60_sh : se60_sl) : (_ownDirT == 1 ? se5_sh : se5_sl)
@@ -1981,7 +1988,6 @@ f_drawMatrix(int master, string action, float conflict, float threat) =>
     color _c60 = l2_dir == 1 ? #34d399 : l2_dir == -1 ? #fb7185 : #94a3b8
     color _c240 = l4_dir == 1 ? #34d399 : l4_dir == -1 ? #fb7185 : #94a3b8
     table.cell(matrix, 0, 0, "WAVE NARRATIVE", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 1, 0, "", bgcolor = color.new(#1f2937, 10))
     table.cell(matrix, 2, 0, "EXECUTION PROBABILITY", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
     table.cell(matrix, 3, 0, _liveDot, text_color = _pulse ? #22d3ee : #475569, text_size = size.small, bgcolor = color.new(#1f2937, 10))
     table.cell(matrix, 0, 1, _wl1, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
@@ -2015,9 +2021,7 @@ f_drawMatrix(int master, string action, float conflict, float threat) =>
     table.cell(matrix, 0, 8, "Fractal Conf", text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 1, 8, str.tostring(math.round(fractalStackScore)) + "%  " + _fcGrade, text_color = fractalStackScore >= 66 ? #34d399 : #fbbf24, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 2, 8, "MULTI-LEVEL PROGRESS", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 3, 8, "", bgcolor = color.new(#1f2937, 10))
     table.cell(matrix, 0, 9, "MTF FUSION", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 1, 9, "", bgcolor = color.new(#1f2937, 10))
     table.cell(matrix, 2, 9, _wl1, text_color = _c1, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 3, 9, f_gauge(nz(se1_wp)) + " " + str.tostring(math.round(nz(se1_wp))) + "%", text_color = _c1, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 0, 10, "Fusion Interp", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
@@ -2036,8 +2040,6 @@ f_drawMatrix(int master, string action, float conflict, float threat) =>
     table.cell(matrix, 1, 13, _ltfRevTx, text_color = _ltfRev ? #fbbf24 : #475569, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 2, 13, _wl5, text_color = _c60, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 3, 13, f_gauge(nz(se60_wp)) + " " + str.tostring(math.round(nz(se60_wp))) + "%", text_color = _c60, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 14, "", text_size = size.small)
-    table.cell(matrix, 1, 14, "", text_size = size.small)
     table.cell(matrix, 2, 14, _wl6, text_color = _c240, text_size = size.small, text_halign = text.align_left)
     table.cell(matrix, 3, 14, f_gauge(nz(se240_wp)) + " " + str.tostring(math.round(nz(se240_wp))) + "%", text_color = _c240, text_size = size.small, text_halign = text.align_left)
 
