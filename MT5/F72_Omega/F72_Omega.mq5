@@ -1548,7 +1548,7 @@ public:
       double margin = 0.0;
       ENUM_ORDER_TYPE ot = (direction == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       if(!OrderCalcMargin(ot, symbol, lots, openPx, margin)) return true;
-      double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+      double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
       if(freeMargin <= 0) return false;
       bool ok = (margin <= freeMargin * (m_marginUseMaxPct / 100.0));
       if(!ok)
@@ -1570,646 +1570,6 @@ public:
   };
 
 #endif // __OMEGA_RISK_MQH__
-
-//==================================================================
-//= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
-//= Source: Include/Chart.mqh
-//==================================================================
-//+------------------------------------------------------------------+
-//|                                                        Chart.mqh |
-//|                                                        F72 OMEGA |
-//|                                                                  |
-//|  See what the engine is seeing and doing — directly on the chart |
-//|  it's attached to. Every visual is a native MT5 chart object     |
-//|  (OBJ_RECTANGLE_LABEL, OBJ_LABEL, OBJ_RECTANGLE, OBJ_TREND,      |
-//|  OBJ_ARROW, OBJ_TEXT). All names share a magic-prefix so cleanup |
-//|  on Deinit is bulletproof.                                       |
-//|                                                                  |
-//|  The chart layer reads the same Trinity + curve tree + per-tier  |
-//|  state that the trading engine reads — it is a pure observer.    |
-//|  It can never affect a decision.                                 |
-//|                                                                  |
-//|  Layout:                                                         |
-//|    HUD panel (top-left)         — Trinity bars · tier · verdict  |
-//|    MTF map (top-right)          — per-TF direction + state       |
-//|    Owner-curve box (price)      — origin→extreme rectangle       |
-//|    Budget-target arrow (price)  — current px → owner.extreme     |
-//|    FU spike marks (chart bars)  — rejection-wick detector        |
-//|    Position labels (entry bars) — tier · int · act risk          |
-//+------------------------------------------------------------------+
-#ifndef __OMEGA_CHART_MQH__
-#define __OMEGA_CHART_MQH__
-
-class OmegaChart
-  {
-private:
-   string  m_prefix;
-   bool    m_enabled;
-   bool    m_drawHUD;
-   bool    m_drawMTF;
-   bool    m_drawOwner;
-   bool    m_drawFlip;
-   bool    m_drawBudget;
-   bool    m_drawFU;
-   bool    m_drawPositions;
-   int     m_hudCorner;          // CORNER_LEFT_UPPER etc.
-   int     m_hudX, m_hudY;
-   int     m_mtfCorner;
-   int     m_mtfX, m_mtfY;
-   int     m_lineHeight;         // pixels per HUD row
-   int     m_hudWidth;           // px
-   int     m_mtfWidth;           // px
-   color   m_bg;
-   color   m_fg;
-   color   m_dim;
-   color   m_bull;
-   color   m_bear;
-   color   m_warn;
-   double  m_fuWickFrac;
-   int     m_fuLookback;
-   long    m_lastOwnerId;
-   datetime m_lastOwnerTime;
-   int     m_posCounter;         // monotonic for position-marker names
-
-   //--- Object name helpers
-   string N(string sub) const { return m_prefix + "_" + sub; }
-
-   void DelByPrefix(string sub)
-     {
-      string match = m_prefix + "_" + sub;
-      int total = ObjectsTotal(0, -1, -1);
-      for(int i = total - 1; i >= 0; i--)
-        {
-         string name = ObjectName(0, i, -1, -1);
-         if(StringFind(name, match) == 0) ObjectDelete(0, name);
-        }
-     }
-
-   //--- Pixel-anchored label (HUD/MTF). Always set ANCHOR + corner so
-   //    the panel sticks to the configured corner regardless of zoom.
-   void EnsureLabel(string name, int corner, int x, int y, string txt,
-                    color clr, int sz = 9, string font = "Consolas")
-     {
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-      ObjectSetString (0, name, OBJPROP_TEXT,      txt);
-      ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  sz);
-      ObjectSetString (0, name, OBJPROP_FONT,      font);
-      ObjectSetInteger(0, name, OBJPROP_BACK,      false);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
-     }
-
-   //--- Pixel-anchored rectangle background (HUD frame).
-   void EnsureRectLabel(string name, int corner, int x, int y, int w, int h,
-                         color bg, color border)
-     {
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, name, OBJPROP_XSIZE,     w);
-      ObjectSetInteger(0, name, OBJPROP_YSIZE,     h);
-      ObjectSetInteger(0, name, OBJPROP_BGCOLOR,   bg);
-      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, name, OBJPROP_COLOR,     border);
-      ObjectSetInteger(0, name, OBJPROP_BACK,      true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
-     }
-
-   //--- Generic 0..100 ASCII bar (10 cells) — visible without unicode tricks.
-   string GaugeBar(double v) const
-     {
-      v = MathMax(0.0, MathMin(100.0, v));
-      int filled = (int)MathRound(v / 10.0);
-      string s = "[";
-      for(int i = 0; i < 10; i++) s += (i < filled) ? "#" : ".";
-      s += "]";
-      return s;
-     }
-
-   //--- TF arrow glyph
-   string DirArrow(int d) const { return d == 1 ? "^" : d == -1 ? "v" : "-"; }
-   color  DirColor(int d) const { return d == 1 ? m_bull : d == -1 ? m_bear : m_dim; }
-
-public:
-                     OmegaChart()
-     {
-      m_prefix = "OMEGA";
-      m_enabled = true;
-      m_drawHUD = true;
-      m_drawMTF = true;
-      m_drawOwner = true;
-      m_drawFlip = true;
-      m_drawBudget = true;
-      m_drawFU = true;
-      m_drawPositions = true;
-      m_hudCorner = CORNER_LEFT_UPPER;
-      m_hudX = 8;  m_hudY = 24;
-      m_mtfCorner = CORNER_RIGHT_UPPER;
-      m_mtfX = 8;  m_mtfY = 24;
-      m_lineHeight = 14;
-      m_hudWidth = 280;
-      m_mtfWidth = 220;
-      m_bg   = (color)0x0A0E27;
-      m_fg   = (color)0xD7FAFF;
-      m_dim  = (color)0x94A3B8;
-      m_bull = (color)0x34D399;
-      m_bear = (color)0x6285FB;     // BGR for #FB7185
-      m_warn = (color)0x24BFFB;     // BGR for #FBBF24
-      m_fuWickFrac = 0.30;
-      m_fuLookback = 5;
-      m_lastOwnerId = -1;
-      m_lastOwnerTime = 0;
-      m_posCounter = 0;
-     }
-
-   void Init(string prefix, bool enabled,
-             bool drawHUD, bool drawMTF, bool drawOwner, bool drawFlip, bool drawBudget,
-             bool drawFU,  bool drawPositions,
-             double fuWickFrac = 0.30, int fuLookback = 5)
-     {
-      m_prefix         = (StringLen(prefix) > 0) ? prefix : "OMEGA";
-      m_enabled        = enabled;
-      m_drawHUD        = drawHUD;
-      m_drawMTF        = drawMTF;
-      m_drawOwner      = drawOwner;
-      m_drawFlip       = drawFlip;
-      m_drawBudget     = drawBudget;
-      m_drawFU         = drawFU;
-      m_drawPositions  = drawPositions;
-      m_fuWickFrac     = fuWickFrac;
-      m_fuLookback     = fuLookback;
-      OmegaLogger::LogInfo("CHART",
-         StringFormat("Init · enabled=%s · HUD=%s MTF=%s owner=%s flip=%s budget=%s FU=%s pos=%s · prefix=%s",
-                      enabled ? "YES" : "NO",
-                      drawHUD ? "Y" : "N", drawMTF ? "Y" : "N", drawOwner ? "Y" : "N",
-                      drawFlip ? "Y" : "N", drawBudget ? "Y" : "N",
-                      drawFU ? "Y" : "N", drawPositions ? "Y" : "N",
-                      m_prefix));
-     }
-
-   void Deinit()
-     {
-      // sweep every object whose name starts with the magic prefix
-      string match = m_prefix + "_";
-      int total = ObjectsTotal(0, -1, -1);
-      for(int i = total - 1; i >= 0; i--)
-        {
-         string name = ObjectName(0, i, -1, -1);
-         if(StringFind(name, match) == 0) ObjectDelete(0, name);
-        }
-      ChartRedraw(0);
-     }
-
-   //--- Per-tick update (called from EA OnTick).
-   void Update(const OmegaState &state, OmegaCurve &curve,
-               OmegaRisk &risk, OmegaCapital &capital,
-               ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
-     {
-      if(!m_enabled) return;
-
-      ENUM_OMEGA_TIER tier = risk.TierForCap(capital);
-      double effEq = risk.EffectiveEquity(capital);
-
-      if(m_drawHUD)    UpdateHUD(state, curve, tier, risk, effEq, lastDec, lastReason);
-      if(m_drawMTF)    UpdateMTFMap(curve);
-      if(m_drawOwner)  UpdateOwnerBox(curve);
-      if(m_drawFlip)   UpdateFlipZone(curve);
-      if(m_drawBudget) UpdateBudgetTarget(curve);
-      if(m_drawFU)     UpdateFUMarks();
-
-      ChartRedraw(0);
-     }
-
-   //--- Called from CampaignPositions::Open after a successful entry.
-   //    Drops a marker arrow + label at the bar where the trade fired.
-   void OnPositionOpen(string symbol, ulong ticket, int direction,
-                        double openPx, double sl,
-                        ENUM_OMEGA_TIER tier, double intendedPct, double actualPct,
-                        double lots, string detail)
-     {
-      if(!m_enabled || !m_drawPositions) return;
-      m_posCounter++;
-      string an = N("POS_ARR_" + IntegerToString(m_posCounter));
-      string ln = N("POS_LBL_" + IntegerToString(m_posCounter));
-      datetime t = TimeCurrent();
-      color c = (direction == 1) ? m_bull : m_bear;
-
-      if(ObjectFind(0, an) < 0) ObjectCreate(0, an, OBJ_ARROW, 0, t, openPx);
-      ObjectSetInteger(0, an, OBJPROP_ARROWCODE, direction == 1 ? 233 : 234);  // up/down arrows
-      ObjectSetInteger(0, an, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, an, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, an, OBJPROP_BACK,  false);
-      ObjectSetInteger(0, an, OBJPROP_HIDDEN,true);
-      ObjectSetString (0, an, OBJPROP_TOOLTIP,
-         StringFormat("%s #%I64u · %.2f lots @ %.5f · SL %.5f · int %.2f%% act %.2f%%",
-                       direction == 1 ? "BUY" : "SELL", ticket, lots, openPx, sl,
-                       intendedPct, actualPct));
-
-      string txt = StringFormat("%s %.2f", direction == 1 ? "B" : "S", lots);
-      if(ObjectFind(0, ln) < 0) ObjectCreate(0, ln, OBJ_TEXT, 0, t, openPx);
-      ObjectSetString (0, ln, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, ln, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, ln, OBJPROP_FONTSIZE, 8);
-      ObjectSetString (0, ln, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, ln, OBJPROP_ANCHOR,
-                        direction == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
-      ObjectSetInteger(0, ln, OBJPROP_HIDDEN, true);
-     }
-
-private:
-   //=== HUD =========================================================
-   void UpdateHUD(const OmegaState &s, OmegaCurve &curve,
-                  ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
-                  ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
-     {
-      int rows = 11;
-      int W = m_hudWidth;
-      int H = m_lineHeight * rows + 14;
-      int X = m_hudX;
-      int Y = m_hudY;
-      // background frame
-      EnsureRectLabel(N("HUD_BG"), m_hudCorner, X, Y, W, H, m_bg, m_dim);
-
-      int row = 0;
-      int rx = X + 8;
-      int ry = Y + 8;
-
-      // Title
-      EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   "F72 OMEGA  ·  v" + OMEGA_VERSION, m_fg, 10, "Consolas");
-      row++;
-
-      // Tier line
-      string tierLine = StringFormat("Tier %s  ·  eq %.2f  ·  cap %.2f%%  ·  pyr %d",
-                                     risk.TierStr(tier), effEq,
-                                     risk.TierMaxRiskPct(tier),
-                                     risk.TierMaxBudget(tier));
-      color tcol = (tier == TIER_MICRO) ? m_warn :
-                   (tier == TIER_SMALL) ? m_warn : m_fg;
-      EnsureLabel(N("HUD_TIER"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   tierLine, tcol);
-      row++;
-
-      // Trinity bars
-      string lifeStr = StringFormat("life  %s %5.1f", GaugeBar(s.life), s.life);
-      string stabStr = StringFormat("stab  %s %5.1f", GaugeBar(s.stability), s.stability);
-      string confStr = StringFormat("conf  %s %5.1f", GaugeBar(s.confidence), s.confidence);
-      EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   lifeStr, s.life >= 60 ? m_bull : s.life >= 45 ? m_warn : m_bear);
-      row++;
-      EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   stabStr, s.stability >= 60 ? m_bull : s.stability >= 45 ? m_warn : m_bear);
-      row++;
-      EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   confStr, s.confidence >= 55 ? m_bull : s.confidence >= 40 ? m_warn : m_bear);
-      row++;
-
-      // Owner curve
-      int oidx = curve.tree.ownerIndex;
-      int oDir = (oidx >= 0) ? curve.tree.tree[oidx].dir : 0;
-      double oNrg = (oidx >= 0) ? curve.tree.tree[oidx].energy : 0.0;
-      string oState = (oidx >= 0) ? curve.tree.tree[oidx].state : "—";
-      int oDepth   = (oidx >= 0) ? curve.tree.tree[oidx].depth : 0;
-      string ownLine = StringFormat("owner %s  d%d  e%4.1f  %s",
-                                     DirArrow(oDir), oDepth, oNrg, oState);
-      EnsureLabel(N("HUD_OWNER"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   ownLine, DirColor(oDir));
-      row++;
-
-      // Curve coordinates
-      double oOrig = (oidx >= 0) ? curve.tree.tree[oidx].origin  : 0.0;
-      double oExt  = (oidx >= 0) ? curve.tree.tree[oidx].extreme : 0.0;
-      double px    = (SymbolInfoDouble(_Symbol, SYMBOL_BID) > 0)
-                      ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : 0.0;
-      string coord = (oidx >= 0)
-         ? StringFormat("%.5f -> %.5f -> %.5f", oOrig, oExt, px)
-         : "no owning curve";
-      EnsureLabel(N("HUD_COORD"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   coord, m_warn);
-      row++;
-
-      // Supporting (force / regime)
-      string supp = StringFormat("force %5.1f  comp %5.1f  align %5.1f",
-                                  s.supporting.forceScore,
-                                  s.supporting.compression,
-                                  s.supporting.alignment);
-      EnsureLabel(N("HUD_SUPP"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   supp, m_dim);
-      row++;
-
-      // Verdict (last decision)
-      string verdict = OmegaStr::DecisionToString(lastDec);
-      color vcol = (lastDec == OMEGA_DEC_ENTER_LONG || lastDec == OMEGA_DEC_ENTER_SHORT
-                     || lastDec == OMEGA_DEC_ADD || lastDec == OMEGA_DEC_REVERSE) ? m_bull
-                  : (lastDec == OMEGA_DEC_EXIT || lastDec == OMEGA_DEC_REDUCE) ? m_warn
-                  : m_dim;
-      string vline = "verdict " + verdict;
-      EnsureLabel(N("HUD_VERD"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   vline, vcol);
-      row++;
-
-      // Reason
-      string reason = "reason  " + OmegaStr::ReasonToString(lastReason);
-      EnsureLabel(N("HUD_REAS"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   reason, m_dim);
-      row++;
-
-      // Probabilities
-      string prob = StringFormat("p(cont/term/trans) %3.0f / %3.0f / %3.0f",
-                                  s.supporting.pContinuation,
-                                  s.supporting.pTerminal,
-                                  s.supporting.pTransfer);
-      EnsureLabel(N("HUD_PROB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   prob, m_dim);
-      row++;
-     }
-
-   //=== MTF Map =====================================================
-   void UpdateMTFMap(OmegaCurve &curve)
-     {
-      int rows = 8;
-      int W = m_mtfWidth;
-      int H = m_lineHeight * rows + 14;
-      int X = m_mtfX;
-      int Y = m_mtfY;
-      EnsureRectLabel(N("MTF_BG"), m_mtfCorner, X, Y, W, H, m_bg, m_dim);
-
-      int row = 0;
-      int rx = X + 8;
-      int ry = Y + 8;
-
-      EnsureLabel(N("MTF_TITLE"), m_mtfCorner, rx, ry + row * m_lineHeight,
-                   "MTF CURVE MAP", m_fg, 10, "Consolas");
-      row++;
-
-      // Per-TF row helper. CurveState exposes its direction via .currentDir
-      // and the emergent state via .narrative or similar — we use the
-      // public Snapshot() string fallback if needed.
-      WriteTFRow(N("MTF_M1"),  curve.tfM1,  "M1",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_M5"),  curve.tfM5,  "M5",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_M15"), curve.tfM15, "M15", rx, ry, row); row++;
-      WriteTFRow(N("MTF_H1"),  curve.tfH1,  "H1",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_H4"),  curve.tfH4,  "H4",  rx, ry, row); row++;
-
-      // Alignment summary
-      int a = AlignmentCount(curve);
-      string al = StringFormat("aligned %d / 5", a);
-      color  ac = (a >= 4) ? m_bull : (a <= 2) ? m_bear : m_warn;
-      EnsureLabel(N("MTF_ALIGN"), m_mtfCorner, rx, ry + row * m_lineHeight,
-                   al, ac);
-     }
-
-   void WriteTFRow(string name, CurveState &tf, string lbl, int rx, int ry, int row)
-     {
-      int d = tf.dir;
-      // Inline emergent state name from CurveState's composite scores.
-      string ph;
-      if(!tf.ready)                         ph = "warmup";
-      else if(tf.compIdx     >= 60.0)       ph = "compress";
-      else if(tf.absScore    >= 60.0)       ph = "absorb";
-      else if(tf.expScore    >= 60.0)       ph = "expand";
-      else if(tf.convScore   >= 60.0)       ph = "convex";
-      else if(tf.waveProgress >= 75.0)      ph = "mature";
-      else                                  ph = "forming";
-      string s = StringFormat("%-3s %s  %s", lbl, DirArrow(d), ph);
-      EnsureLabel(name, m_mtfCorner, rx, ry + row * m_lineHeight,
-                   s, DirColor(d));
-     }
-
-   int AlignmentCount(OmegaCurve &curve)
-     {
-      // Count TFs whose direction matches the chart-TF direction.
-      CurveState *chart = curve.ChartTfState();
-      if(chart == NULL) return 0;
-      int ref = chart.dir;
-      if(ref == 0) return 0;
-      int n = 0;
-      if(curve.tfM1.dir  == ref) n++;
-      if(curve.tfM5.dir  == ref) n++;
-      if(curve.tfM15.dir == ref) n++;
-      if(curve.tfH1.dir  == ref) n++;
-      if(curve.tfH4.dir  == ref) n++;
-      return n;
-     }
-
-   //=== Owner curve box =============================================
-   void UpdateOwnerBox(OmegaCurve &curve)
-     {
-      int oidx = curve.tree.ownerIndex;
-      string name = N("OWNERBOX");
-      string lblName = N("OWNERLBL");
-      if(oidx < 0)
-        {
-         if(ObjectFind(0, name)    >= 0) ObjectDelete(0, name);
-         if(ObjectFind(0, lblName) >= 0) ObjectDelete(0, lblName);
-         return;
-        }
-      CurveNode owner = curve.tree.tree[oidx];
-      if(!owner.alive || owner.origin <= 0 || owner.extreme <= 0) return;
-
-      datetime t1 = (owner.birthTime > 0) ? owner.birthTime : TimeCurrent() - 3600 * 24;
-      datetime t2 = TimeCurrent();
-      double hi = MathMax(owner.origin, owner.extreme);
-      double lo = MathMin(owner.origin, owner.extreme);
-      color  c  = (owner.dir == 1) ? m_bull : (owner.dir == -1) ? m_bear : m_dim;
-
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, owner.depth > 0 ? 1 : 2);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, owner.depth > 0 ? STYLE_DASH : STYLE_SOLID);
-      ObjectSetInteger(0, name, OBJPROP_FILL,  false);
-      ObjectSetInteger(0, name, OBJPROP_BACK,  true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-
-      // Label at the extreme
-      string txt = StringFormat("OWNER %s  %s  e%.1f",
-                                  owner.dir == 1 ? "^" : "v",
-                                  owner.state, owner.energy);
-      if(ObjectFind(0, lblName) < 0)
-         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
-      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
-      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
-      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
-     }
-
-   //=== Flip Zone box ===============================================
-   //   Use the chart-TF CurveState's ft/fb (flip zone top/bottom) —
-   //   the structural pivot the wave defends. Right-extended so the
-   //   trader sees the level price will react to.
-   void UpdateFlipZone(OmegaCurve &curve)
-     {
-      string name = N("FLIPZONE");
-      string lbl  = N("FLIPZONELBL");
-      CurveState *cs = curve.ChartTfState();
-      if(cs == NULL || cs.ft <= 0 || cs.fb <= 0)
-        {
-         if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-         if(ObjectFind(0, lbl)  >= 0) ObjectDelete(0, lbl);
-         return;
-        }
-      datetime t1 = TimeCurrent() - PeriodSeconds(_Period) * 60;
-      datetime t2 = TimeCurrent() + PeriodSeconds(_Period) * 12;
-      double hi = MathMax(cs.ft, cs.fb);
-      double lo = MathMin(cs.ft, cs.fb);
-      color  c  = (cs.dir == 1) ? m_bull : (cs.dir == -1) ? m_bear : (color)0xC084FC;
-
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, name, OBJPROP_FILL, true);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-
-      if(ObjectFind(0, lbl) < 0)
-         ObjectCreate(0, lbl, OBJ_TEXT, 0, t2, (hi + lo) / 2.0);
-      ObjectSetInteger(0, lbl, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lbl, OBJPROP_PRICE, 0, (hi + lo) / 2.0);
-      ObjectSetString (0, lbl, OBJPROP_TEXT, "FLIP ZONE");
-      ObjectSetInteger(0, lbl, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
-      ObjectSetString (0, lbl, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_LEFT);
-      ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
-     }
-
-   //=== Budget target ===============================================
-   void UpdateBudgetTarget(OmegaCurve &curve)
-     {
-      int oidx = curve.tree.ownerIndex;
-      string lineName = N("BUDGET_LINE");
-      string lblName  = N("BUDGET_LBL");
-      if(oidx < 0)
-        {
-         if(ObjectFind(0, lineName) >= 0) ObjectDelete(0, lineName);
-         if(ObjectFind(0, lblName)  >= 0) ObjectDelete(0, lblName);
-         return;
-        }
-      CurveNode owner = curve.tree.tree[oidx];
-      if(!owner.alive || owner.extreme <= 0) return;
-
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(bid <= 0) return;
-
-      datetime t1 = TimeCurrent();
-      datetime t2 = t1 + PeriodSeconds(_Period) * 12;
-      color  c  = (owner.dir == 1) ? m_warn : (owner.dir == -1) ? m_bear : m_dim;
-
-      if(ObjectFind(0, lineName) < 0)
-         ObjectCreate(0, lineName, OBJ_TREND, 0, t1, bid, t2, owner.extreme);
-      ObjectSetInteger(0, lineName, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 0, bid);
-      ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 1, owner.extreme);
-      ObjectSetInteger(0, lineName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
-      ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
-
-      string txt = StringFormat(">> BUDGET TGT  %.5f  d%d/%d",
-                                  owner.extreme, owner.depth, 4);
-      if(ObjectFind(0, lblName) < 0)
-         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
-      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
-      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
-      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
-     }
-
-   //=== FU spike marks ==============================================
-   //   Wick-fraction detector identical to the Pine indicator's f_fuPool
-   //   shape — runs on chart bars, marks with up/down arrow + barcolor.
-   void UpdateFUMarks()
-     {
-      // Only mark the most-recent confirmed bar to keep object count low.
-      // (The chart accumulates one mark per FU bar over time as bars close.)
-      MqlRates r[];
-      ArraySetAsSeries(r, true);
-      if(CopyRates(_Symbol, _Period, 0, MathMax(m_fuLookback + 2, 6), r) <= 0) return;
-      // r[0] = forming bar, r[1] = last closed bar
-      if(ArraySize(r) < 2) return;
-      MqlRates b = r[1];
-
-      double rng = MathMax(b.high - b.low, _Point);
-      double upperW = (b.high - MathMax(b.open, b.close)) / rng;
-      double lowerW = (MathMin(b.open, b.close) - b.low)  / rng;
-
-      // Highest/lowest among the prior lookback bars (excluding b itself)
-      double pHi = 0, pLo = 0;
-      bool   pOk = false;
-      if(ArraySize(r) >= 2 + m_fuLookback)
-        {
-         pHi = r[2].high;
-         pLo = r[2].low;
-         for(int i = 3; i < 2 + m_fuLookback && i < ArraySize(r); i++)
-           {
-            if(r[i].high > pHi) pHi = r[i].high;
-            if(r[i].low  < pLo) pLo = r[i].low;
-           }
-         pOk = true;
-        }
-
-      bool bear = (upperW >= m_fuWickFrac) && pOk &&
-                  ((b.high >= pHi && b.close < pHi) || (b.close < b.open && b.high >= pHi));
-      bool bull = (lowerW >= m_fuWickFrac) && pOk &&
-                  ((b.low  <= pLo && b.close > pLo) || (b.close > b.open && b.low  <= pLo));
-      if(!bear && !bull) return;
-
-      string id = N("FU_" + IntegerToString((int)b.time));
-      if(ObjectFind(0, id) >= 0) return;  // already marked
-
-      ObjectCreate(0, id, OBJ_ARROW, 0, b.time, bull ? b.low : b.high);
-      ObjectSetInteger(0, id, OBJPROP_ARROWCODE, bull ? 233 : 234);
-      ObjectSetInteger(0, id, OBJPROP_COLOR, bull ? m_bull : m_warn);
-      ObjectSetInteger(0, id, OBJPROP_ANCHOR, bull ? ANCHOR_TOP : ANCHOR_BOTTOM);
-      ObjectSetInteger(0, id, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, id, OBJPROP_HIDDEN, true);
-      ObjectSetString (0, id, OBJPROP_TOOLTIP, bull ? "FU bull" : "FU bear");
-     }
-  };
-
-#endif // __OMEGA_CHART_MQH__
-
-//-- Phase 5.5: chart instance is a single global (declared early so any
-//   class method below can reference it). Init/Update/Deinit are wired
-//   from the EA lifecycle handlers.
-OmegaChart g_chart;
-//-- Phase 5.5: track last decision so the HUD can show what the engine just did
-ENUM_OMEGA_DECISION g_lastDecision = OMEGA_DEC_OBSERVE;
-ENUM_OMEGA_REASON   g_lastReason   = REASON_PHASE_NOT_BUILT;
 
 //==================================================================
 //= MODULE: PaperTrade
@@ -4187,6 +3547,646 @@ public:
   };
 
 #endif // __OMEGA_CURVE_MQH__
+//==================================================================
+//= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
+//= Source: Include/Chart.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                        Chart.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|  See what the engine is seeing and doing — directly on the chart |
+//|  it's attached to. Every visual is a native MT5 chart object     |
+//|  (OBJ_RECTANGLE_LABEL, OBJ_LABEL, OBJ_RECTANGLE, OBJ_TREND,      |
+//|  OBJ_ARROW, OBJ_TEXT). All names share a magic-prefix so cleanup |
+//|  on Deinit is bulletproof.                                       |
+//|                                                                  |
+//|  The chart layer reads the same Trinity + curve tree + per-tier  |
+//|  state that the trading engine reads — it is a pure observer.    |
+//|  It can never affect a decision.                                 |
+//|                                                                  |
+//|  Layout:                                                         |
+//|    HUD panel (top-left)         — Trinity bars · tier · verdict  |
+//|    MTF map (top-right)          — per-TF direction + state       |
+//|    Owner-curve box (price)      — origin→extreme rectangle       |
+//|    Budget-target arrow (price)  — current px → owner.extreme     |
+//|    FU spike marks (chart bars)  — rejection-wick detector        |
+//|    Position labels (entry bars) — tier · int · act risk          |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CHART_MQH__
+#define __OMEGA_CHART_MQH__
+
+class OmegaChart
+  {
+private:
+   string  m_prefix;
+   bool    m_enabled;
+   bool    m_drawHUD;
+   bool    m_drawMTF;
+   bool    m_drawOwner;
+   bool    m_drawFlip;
+   bool    m_drawBudget;
+   bool    m_drawFU;
+   bool    m_drawPositions;
+   int     m_hudCorner;          // CORNER_LEFT_UPPER etc.
+   int     m_hudX, m_hudY;
+   int     m_mtfCorner;
+   int     m_mtfX, m_mtfY;
+   int     m_lineHeight;         // pixels per HUD row
+   int     m_hudWidth;           // px
+   int     m_mtfWidth;           // px
+   color   m_bg;
+   color   m_fg;
+   color   m_dim;
+   color   m_bull;
+   color   m_bear;
+   color   m_warn;
+   double  m_fuWickFrac;
+   int     m_fuLookback;
+   long    m_lastOwnerId;
+   datetime m_lastOwnerTime;
+   int     m_posCounter;         // monotonic for position-marker names
+
+   //--- Object name helpers
+   string N(string sub) const { return m_prefix + "_" + sub; }
+
+   void DelByPrefix(string sub)
+     {
+      string match = m_prefix + "_" + sub;
+      int total = ObjectsTotal(0, -1, -1);
+      for(int i = total - 1; i >= 0; i--)
+        {
+         string name = ObjectName(0, i, -1, -1);
+         if(StringFind(name, match) == 0) ObjectDelete(0, name);
+        }
+     }
+
+   //--- Pixel-anchored label (HUD/MTF). Always set ANCHOR + corner so
+   //    the panel sticks to the configured corner regardless of zoom.
+   void EnsureLabel(string name, int corner, int x, int y, string txt,
+                    color clr, int sz = 9, string font = "Consolas")
+     {
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetString (0, name, OBJPROP_TEXT,      txt);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  sz);
+      ObjectSetString (0, name, OBJPROP_FONT,      font);
+      ObjectSetInteger(0, name, OBJPROP_BACK,      false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
+     }
+
+   //--- Pixel-anchored rectangle background (HUD frame).
+   void EnsureRectLabel(string name, int corner, int x, int y, int w, int h,
+                         color bg, color border)
+     {
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE,     w);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE,     h);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR,   bg);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,     border);
+      ObjectSetInteger(0, name, OBJPROP_BACK,      true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
+     }
+
+   //--- Generic 0..100 ASCII bar (10 cells) — visible without unicode tricks.
+   string GaugeBar(double v) const
+     {
+      v = MathMax(0.0, MathMin(100.0, v));
+      int filled = (int)MathRound(v / 10.0);
+      string s = "[";
+      for(int i = 0; i < 10; i++) s += (i < filled) ? "#" : ".";
+      s += "]";
+      return s;
+     }
+
+   //--- TF arrow glyph
+   string DirArrow(int d) const { return d == 1 ? "^" : d == -1 ? "v" : "-"; }
+   color  DirColor(int d) const { return d == 1 ? m_bull : d == -1 ? m_bear : m_dim; }
+
+public:
+                     OmegaChart()
+     {
+      m_prefix = "OMEGA";
+      m_enabled = true;
+      m_drawHUD = true;
+      m_drawMTF = true;
+      m_drawOwner = true;
+      m_drawFlip = true;
+      m_drawBudget = true;
+      m_drawFU = true;
+      m_drawPositions = true;
+      m_hudCorner = CORNER_LEFT_UPPER;
+      m_hudX = 8;  m_hudY = 24;
+      m_mtfCorner = CORNER_RIGHT_UPPER;
+      m_mtfX = 8;  m_mtfY = 24;
+      m_lineHeight = 14;
+      m_hudWidth = 280;
+      m_mtfWidth = 220;
+      m_bg   = (color)0x0A0E27;
+      m_fg   = (color)0xD7FAFF;
+      m_dim  = (color)0x94A3B8;
+      m_bull = (color)0x34D399;
+      m_bear = (color)0x6285FB;     // BGR for #FB7185
+      m_warn = (color)0x24BFFB;     // BGR for #FBBF24
+      m_fuWickFrac = 0.30;
+      m_fuLookback = 5;
+      m_lastOwnerId = -1;
+      m_lastOwnerTime = 0;
+      m_posCounter = 0;
+     }
+
+   void Init(string prefix, bool enabled,
+             bool drawHUD, bool drawMTF, bool drawOwner, bool drawFlip, bool drawBudget,
+             bool drawFU,  bool drawPositions,
+             double fuWickFrac = 0.30, int fuLookback = 5)
+     {
+      m_prefix         = (StringLen(prefix) > 0) ? prefix : "OMEGA";
+      m_enabled        = enabled;
+      m_drawHUD        = drawHUD;
+      m_drawMTF        = drawMTF;
+      m_drawOwner      = drawOwner;
+      m_drawFlip       = drawFlip;
+      m_drawBudget     = drawBudget;
+      m_drawFU         = drawFU;
+      m_drawPositions  = drawPositions;
+      m_fuWickFrac     = fuWickFrac;
+      m_fuLookback     = fuLookback;
+      OmegaLogger::LogInfo("CHART",
+         StringFormat("Init · enabled=%s · HUD=%s MTF=%s owner=%s flip=%s budget=%s FU=%s pos=%s · prefix=%s",
+                      enabled ? "YES" : "NO",
+                      drawHUD ? "Y" : "N", drawMTF ? "Y" : "N", drawOwner ? "Y" : "N",
+                      drawFlip ? "Y" : "N", drawBudget ? "Y" : "N",
+                      drawFU ? "Y" : "N", drawPositions ? "Y" : "N",
+                      m_prefix));
+     }
+
+   void Deinit()
+     {
+      // sweep every object whose name starts with the magic prefix
+      string match = m_prefix + "_";
+      int total = ObjectsTotal(0, -1, -1);
+      for(int i = total - 1; i >= 0; i--)
+        {
+         string name = ObjectName(0, i, -1, -1);
+         if(StringFind(name, match) == 0) ObjectDelete(0, name);
+        }
+      ChartRedraw(0);
+     }
+
+   //--- Per-tick update (called from EA OnTick).
+   void Update(const OmegaState &state, OmegaCurve &curve,
+               OmegaRisk &risk, OmegaCapital &capital,
+               ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
+     {
+      if(!m_enabled) return;
+
+      ENUM_OMEGA_TIER tier = risk.TierForCap(capital);
+      double effEq = risk.EffectiveEquity(capital);
+
+      if(m_drawHUD)    UpdateHUD(state, curve, tier, risk, effEq, lastDec, lastReason);
+      if(m_drawMTF)    UpdateMTFMap(curve);
+      if(m_drawOwner)  UpdateOwnerBox(curve);
+      if(m_drawFlip)   UpdateFlipZone(curve);
+      if(m_drawBudget) UpdateBudgetTarget(curve);
+      if(m_drawFU)     UpdateFUMarks();
+
+      ChartRedraw(0);
+     }
+
+   //--- Called from CampaignPositions::Open after a successful entry.
+   //    Drops a marker arrow + label at the bar where the trade fired.
+   void OnPositionOpen(string symbol, ulong ticket, int direction,
+                        double openPx, double sl,
+                        ENUM_OMEGA_TIER tier, double intendedPct, double actualPct,
+                        double lots, string detail)
+     {
+      if(!m_enabled || !m_drawPositions) return;
+      m_posCounter++;
+      string an = N("POS_ARR_" + IntegerToString(m_posCounter));
+      string ln = N("POS_LBL_" + IntegerToString(m_posCounter));
+      datetime t = TimeCurrent();
+      color c = (direction == 1) ? m_bull : m_bear;
+
+      if(ObjectFind(0, an) < 0) ObjectCreate(0, an, OBJ_ARROW, 0, t, openPx);
+      ObjectSetInteger(0, an, OBJPROP_ARROWCODE, direction == 1 ? 233 : 234);  // up/down arrows
+      ObjectSetInteger(0, an, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, an, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, an, OBJPROP_BACK,  false);
+      ObjectSetInteger(0, an, OBJPROP_HIDDEN,true);
+      ObjectSetString (0, an, OBJPROP_TOOLTIP,
+         StringFormat("%s #%I64u · %.2f lots @ %.5f · SL %.5f · int %.2f%% act %.2f%%",
+                       direction == 1 ? "BUY" : "SELL", ticket, lots, openPx, sl,
+                       intendedPct, actualPct));
+
+      string txt = StringFormat("%s %.2f", direction == 1 ? "B" : "S", lots);
+      if(ObjectFind(0, ln) < 0) ObjectCreate(0, ln, OBJ_TEXT, 0, t, openPx);
+      ObjectSetString (0, ln, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, ln, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, ln, OBJPROP_FONTSIZE, 8);
+      ObjectSetString (0, ln, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, ln, OBJPROP_ANCHOR,
+                        direction == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
+      ObjectSetInteger(0, ln, OBJPROP_HIDDEN, true);
+     }
+
+private:
+   //=== HUD =========================================================
+   void UpdateHUD(const OmegaState &s, OmegaCurve &curve,
+                  ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
+                  ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
+     {
+      int rows = 11;
+      int W = m_hudWidth;
+      int H = m_lineHeight * rows + 14;
+      int X = m_hudX;
+      int Y = m_hudY;
+      // background frame
+      EnsureRectLabel(N("HUD_BG"), m_hudCorner, X, Y, W, H, m_bg, m_dim);
+
+      int row = 0;
+      int rx = X + 8;
+      int ry = Y + 8;
+
+      // Title
+      EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   "F72 OMEGA  ·  v" + OMEGA_VERSION, m_fg, 10, "Consolas");
+      row++;
+
+      // Tier line
+      string tierLine = StringFormat("Tier %s  ·  eq %.2f  ·  cap %.2f%%  ·  pyr %d",
+                                     risk.TierStr(tier), effEq,
+                                     risk.TierMaxRiskPct(tier),
+                                     risk.TierMaxBudget(tier));
+      color tcol = (tier == TIER_MICRO) ? m_warn :
+                   (tier == TIER_SMALL) ? m_warn : m_fg;
+      EnsureLabel(N("HUD_TIER"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   tierLine, tcol);
+      row++;
+
+      // Trinity bars
+      string lifeStr = StringFormat("life  %s %5.1f", GaugeBar(s.life), s.life);
+      string stabStr = StringFormat("stab  %s %5.1f", GaugeBar(s.stability), s.stability);
+      string confStr = StringFormat("conf  %s %5.1f", GaugeBar(s.confidence), s.confidence);
+      EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   lifeStr, s.life >= 60 ? m_bull : s.life >= 45 ? m_warn : m_bear);
+      row++;
+      EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   stabStr, s.stability >= 60 ? m_bull : s.stability >= 45 ? m_warn : m_bear);
+      row++;
+      EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   confStr, s.confidence >= 55 ? m_bull : s.confidence >= 40 ? m_warn : m_bear);
+      row++;
+
+      // Owner curve
+      int oidx = curve.tree.ownerIndex;
+      int oDir = (oidx >= 0) ? curve.tree.tree[oidx].dir : 0;
+      double oNrg = (oidx >= 0) ? curve.tree.tree[oidx].energy : 0.0;
+      string oState = (oidx >= 0) ? curve.tree.tree[oidx].state : "—";
+      int oDepth   = (oidx >= 0) ? curve.tree.tree[oidx].depth : 0;
+      string ownLine = StringFormat("owner %s  d%d  e%4.1f  %s",
+                                     DirArrow(oDir), oDepth, oNrg, oState);
+      EnsureLabel(N("HUD_OWNER"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   ownLine, DirColor(oDir));
+      row++;
+
+      // Curve coordinates
+      double oOrig = (oidx >= 0) ? curve.tree.tree[oidx].origin  : 0.0;
+      double oExt  = (oidx >= 0) ? curve.tree.tree[oidx].extreme : 0.0;
+      double px    = (SymbolInfoDouble(_Symbol, SYMBOL_BID) > 0)
+                      ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : 0.0;
+      string coord = (oidx >= 0)
+         ? StringFormat("%.5f -> %.5f -> %.5f", oOrig, oExt, px)
+         : "no owning curve";
+      EnsureLabel(N("HUD_COORD"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   coord, m_warn);
+      row++;
+
+      // Supporting (force / regime)
+      string supp = StringFormat("force %5.1f  comp %5.1f  align %5.1f",
+                                  s.supporting.forceScore,
+                                  s.supporting.compression,
+                                  s.supporting.alignment);
+      EnsureLabel(N("HUD_SUPP"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   supp, m_dim);
+      row++;
+
+      // Verdict (last decision)
+      string verdict = OmegaStr::DecisionToString(lastDec);
+      color vcol = (lastDec == OMEGA_DEC_ENTER_LONG || lastDec == OMEGA_DEC_ENTER_SHORT
+                     || lastDec == OMEGA_DEC_ADD || lastDec == OMEGA_DEC_REVERSE) ? m_bull
+                  : (lastDec == OMEGA_DEC_EXIT || lastDec == OMEGA_DEC_REDUCE) ? m_warn
+                  : m_dim;
+      string vline = "verdict " + verdict;
+      EnsureLabel(N("HUD_VERD"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   vline, vcol);
+      row++;
+
+      // Reason
+      string reason = "reason  " + OmegaStr::ReasonToString(lastReason);
+      EnsureLabel(N("HUD_REAS"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   reason, m_dim);
+      row++;
+
+      // Probabilities
+      string prob = StringFormat("p(cont/term/trans) %3.0f / %3.0f / %3.0f",
+                                  s.supporting.pContinuation,
+                                  s.supporting.pTerminal,
+                                  s.supporting.pTransfer);
+      EnsureLabel(N("HUD_PROB"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   prob, m_dim);
+      row++;
+     }
+
+   //=== MTF Map =====================================================
+   void UpdateMTFMap(OmegaCurve &curve)
+     {
+      int rows = 8;
+      int W = m_mtfWidth;
+      int H = m_lineHeight * rows + 14;
+      int X = m_mtfX;
+      int Y = m_mtfY;
+      EnsureRectLabel(N("MTF_BG"), m_mtfCorner, X, Y, W, H, m_bg, m_dim);
+
+      int row = 0;
+      int rx = X + 8;
+      int ry = Y + 8;
+
+      EnsureLabel(N("MTF_TITLE"), m_mtfCorner, rx, ry + row * m_lineHeight,
+                   "MTF CURVE MAP", m_fg, 10, "Consolas");
+      row++;
+
+      // Per-TF row helper. CurveState exposes its direction via .currentDir
+      // and the emergent state via .narrative or similar — we use the
+      // public Snapshot() string fallback if needed.
+      WriteTFRow(N("MTF_M1"),  curve.tfM1,  "M1",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_M5"),  curve.tfM5,  "M5",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_M15"), curve.tfM15, "M15", rx, ry, row); row++;
+      WriteTFRow(N("MTF_H1"),  curve.tfH1,  "H1",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_H4"),  curve.tfH4,  "H4",  rx, ry, row); row++;
+
+      // Alignment summary
+      int a = AlignmentCount(curve);
+      string al = StringFormat("aligned %d / 5", a);
+      color  ac = (a >= 4) ? m_bull : (a <= 2) ? m_bear : m_warn;
+      EnsureLabel(N("MTF_ALIGN"), m_mtfCorner, rx, ry + row * m_lineHeight,
+                   al, ac);
+     }
+
+   void WriteTFRow(string name, CurveState &tf, string lbl, int rx, int ry, int row)
+     {
+      int d = tf.dir;
+      // Inline emergent state name from CurveState's composite scores.
+      string ph;
+      if(!tf.ready)                         ph = "warmup";
+      else if(tf.compIdx     >= 60.0)       ph = "compress";
+      else if(tf.absScore    >= 60.0)       ph = "absorb";
+      else if(tf.expScore    >= 60.0)       ph = "expand";
+      else if(tf.convScore   >= 60.0)       ph = "convex";
+      else if(tf.waveProgress >= 75.0)      ph = "mature";
+      else                                  ph = "forming";
+      string s = StringFormat("%-3s %s  %s", lbl, DirArrow(d), ph);
+      EnsureLabel(name, m_mtfCorner, rx, ry + row * m_lineHeight,
+                   s, DirColor(d));
+     }
+
+   int AlignmentCount(OmegaCurve &curve)
+     {
+      // Count TFs whose direction matches the chart-TF direction.
+      CurveState *chart = curve.ChartTfState();
+      if(chart == NULL) return 0;
+      int ref = chart.dir;
+      if(ref == 0) return 0;
+      int n = 0;
+      if(curve.tfM1.dir  == ref) n++;
+      if(curve.tfM5.dir  == ref) n++;
+      if(curve.tfM15.dir == ref) n++;
+      if(curve.tfH1.dir  == ref) n++;
+      if(curve.tfH4.dir  == ref) n++;
+      return n;
+     }
+
+   //=== Owner curve box =============================================
+   void UpdateOwnerBox(OmegaCurve &curve)
+     {
+      int oidx = curve.tree.ownerIndex;
+      string name = N("OWNERBOX");
+      string lblName = N("OWNERLBL");
+      if(oidx < 0)
+        {
+         if(ObjectFind(0, name)    >= 0) ObjectDelete(0, name);
+         if(ObjectFind(0, lblName) >= 0) ObjectDelete(0, lblName);
+         return;
+        }
+      CurveNode owner = curve.tree.tree[oidx];
+      if(!owner.alive || owner.origin <= 0 || owner.extreme <= 0) return;
+
+      datetime t1 = (owner.birthTime > 0) ? owner.birthTime : TimeCurrent() - 3600 * 24;
+      datetime t2 = TimeCurrent();
+      double hi = MathMax(owner.origin, owner.extreme);
+      double lo = MathMin(owner.origin, owner.extreme);
+      color  c  = (owner.dir == 1) ? m_bull : (owner.dir == -1) ? m_bear : m_dim;
+
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, owner.depth > 0 ? 1 : 2);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, owner.depth > 0 ? STYLE_DASH : STYLE_SOLID);
+      ObjectSetInteger(0, name, OBJPROP_FILL,  false);
+      ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+
+      // Label at the extreme
+      string txt = StringFormat("OWNER %s  %s  e%.1f",
+                                  owner.dir == 1 ? "^" : "v",
+                                  owner.state, owner.energy);
+      if(ObjectFind(0, lblName) < 0)
+         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
+      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
+      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
+      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
+     }
+
+   //=== Flip Zone box ===============================================
+   //   Use the chart-TF CurveState's ft/fb (flip zone top/bottom) —
+   //   the structural pivot the wave defends. Right-extended so the
+   //   trader sees the level price will react to.
+   void UpdateFlipZone(OmegaCurve &curve)
+     {
+      string name = N("FLIPZONE");
+      string lbl  = N("FLIPZONELBL");
+      CurveState *cs = curve.ChartTfState();
+      if(cs == NULL || cs.ft <= 0 || cs.fb <= 0)
+        {
+         if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+         if(ObjectFind(0, lbl)  >= 0) ObjectDelete(0, lbl);
+         return;
+        }
+      datetime t1 = TimeCurrent() - PeriodSeconds(_Period) * 60;
+      datetime t2 = TimeCurrent() + PeriodSeconds(_Period) * 12;
+      double hi = MathMax(cs.ft, cs.fb);
+      double lo = MathMin(cs.ft, cs.fb);
+      color  c  = (cs.dir == 1) ? m_bull : (cs.dir == -1) ? m_bear : (color)0xC084FC;
+
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_FILL, true);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+
+      if(ObjectFind(0, lbl) < 0)
+         ObjectCreate(0, lbl, OBJ_TEXT, 0, t2, (hi + lo) / 2.0);
+      ObjectSetInteger(0, lbl, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lbl, OBJPROP_PRICE, 0, (hi + lo) / 2.0);
+      ObjectSetString (0, lbl, OBJPROP_TEXT, "FLIP ZONE");
+      ObjectSetInteger(0, lbl, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
+      ObjectSetString (0, lbl, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
+     }
+
+   //=== Budget target ===============================================
+   void UpdateBudgetTarget(OmegaCurve &curve)
+     {
+      int oidx = curve.tree.ownerIndex;
+      string lineName = N("BUDGET_LINE");
+      string lblName  = N("BUDGET_LBL");
+      if(oidx < 0)
+        {
+         if(ObjectFind(0, lineName) >= 0) ObjectDelete(0, lineName);
+         if(ObjectFind(0, lblName)  >= 0) ObjectDelete(0, lblName);
+         return;
+        }
+      CurveNode owner = curve.tree.tree[oidx];
+      if(!owner.alive || owner.extreme <= 0) return;
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(bid <= 0) return;
+
+      datetime t1 = TimeCurrent();
+      datetime t2 = t1 + PeriodSeconds(_Period) * 12;
+      color  c  = (owner.dir == 1) ? m_warn : (owner.dir == -1) ? m_bear : m_dim;
+
+      if(ObjectFind(0, lineName) < 0)
+         ObjectCreate(0, lineName, OBJ_TREND, 0, t1, bid, t2, owner.extreme);
+      ObjectSetInteger(0, lineName, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 0, bid);
+      ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 1, owner.extreme);
+      ObjectSetInteger(0, lineName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
+
+      string txt = StringFormat(">> BUDGET TGT  %.5f  d%d/%d",
+                                  owner.extreme, owner.depth, 4);
+      if(ObjectFind(0, lblName) < 0)
+         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
+      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
+      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
+      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
+     }
+
+   //=== FU spike marks ==============================================
+   //   Wick-fraction detector identical to the Pine indicator's f_fuPool
+   //   shape — runs on chart bars, marks with up/down arrow + barcolor.
+   void UpdateFUMarks()
+     {
+      // Only mark the most-recent confirmed bar to keep object count low.
+      // (The chart accumulates one mark per FU bar over time as bars close.)
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      if(CopyRates(_Symbol, _Period, 0, MathMax(m_fuLookback + 2, 6), r) <= 0) return;
+      // r[0] = forming bar, r[1] = last closed bar
+      if(ArraySize(r) < 2) return;
+      MqlRates b = r[1];
+
+      double rng = MathMax(b.high - b.low, _Point);
+      double upperW = (b.high - MathMax(b.open, b.close)) / rng;
+      double lowerW = (MathMin(b.open, b.close) - b.low)  / rng;
+
+      // Highest/lowest among the prior lookback bars (excluding b itself)
+      double pHi = 0, pLo = 0;
+      bool   pOk = false;
+      if(ArraySize(r) >= 2 + m_fuLookback)
+        {
+         pHi = r[2].high;
+         pLo = r[2].low;
+         for(int i = 3; i < 2 + m_fuLookback && i < ArraySize(r); i++)
+           {
+            if(r[i].high > pHi) pHi = r[i].high;
+            if(r[i].low  < pLo) pLo = r[i].low;
+           }
+         pOk = true;
+        }
+
+      bool bear = (upperW >= m_fuWickFrac) && pOk &&
+                  ((b.high >= pHi && b.close < pHi) || (b.close < b.open && b.high >= pHi));
+      bool bull = (lowerW >= m_fuWickFrac) && pOk &&
+                  ((b.low  <= pLo && b.close > pLo) || (b.close > b.open && b.low  <= pLo));
+      if(!bear && !bull) return;
+
+      string id = N("FU_" + IntegerToString((int)b.time));
+      if(ObjectFind(0, id) >= 0) return;  // already marked
+
+      ObjectCreate(0, id, OBJ_ARROW, 0, b.time, bull ? b.low : b.high);
+      ObjectSetInteger(0, id, OBJPROP_ARROWCODE, bull ? 233 : 234);
+      ObjectSetInteger(0, id, OBJPROP_COLOR, bull ? m_bull : m_warn);
+      ObjectSetInteger(0, id, OBJPROP_ANCHOR, bull ? ANCHOR_TOP : ANCHOR_BOTTOM);
+      ObjectSetInteger(0, id, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, id, OBJPROP_HIDDEN, true);
+      ObjectSetString (0, id, OBJPROP_TOOLTIP, bull ? "FU bull" : "FU bear");
+     }
+  };
+
+#endif // __OMEGA_CHART_MQH__
+
+//-- Phase 5.5: chart instance is a single global (declared early so any
+//   class method below can reference it). Init/Update/Deinit are wired
+//   from the EA lifecycle handlers.
+OmegaChart g_chart;
+//-- Phase 5.5: track last decision so the HUD can show what the engine just did
+ENUM_OMEGA_DECISION g_lastDecision = OMEGA_DEC_OBSERVE;
+ENUM_OMEGA_REASON   g_lastReason   = REASON_PHASE_NOT_BUILT;
+
 
 //==================================================================
 //= MODULE: Participant/ParticipantZone
@@ -5924,7 +5924,7 @@ public:
 
       //--- Pyramid budget gate: refuse to add when same-side position
       //    count has hit the per-tier budget.
-      int sideCount = CountByDirection(direction);
+      int sideCount = CountActive(direction);
       int tierBudget = m_risk.TierMaxBudget(tier);
       if(sideCount >= tierBudget)
         {
