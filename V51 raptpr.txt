@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v53", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v54", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -2064,7 +2064,6 @@ f_drawTf() =>
     table.cell(tfPanel, 0, 7, "Authority", text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_left)
     table.cell(tfPanel, 1, 7, f_gauge(fractalStackScore), text_color = fractalStackDir == 1 ? #4ade80 : fractalStackDir == -1 ? #f87171 : #fbbf24, text_size = size.normal, text_halign = text.align_left)
     table.cell(tfPanel, 0, 8, (fractalStackScore >= 66 ? "DOMINANT" : "CONTESTED") + " · " + (fractalStackDir == 1 ? "TRANSFER UPWARD" : fractalStackDir == -1 ? "TRANSFER DOWNWARD" : "BALANCED"), text_color = #cfe9ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(tfPanel, 1, 8, "", text_size = size.small)
 
 if barstate.islast
     if array.size(net_lines) > 0
@@ -2362,7 +2361,6 @@ f_drawCampaign() =>
         table.cell(campaign, 0, 8, "Interference", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
         table.cell(campaign, 1, 8, _interfTx, text_color = _interfCol, text_size = size.small, text_halign = text.align_left)
         table.cell(campaign, 0, 9, _campaign == "TERMINAL" ? "⚠ ENTRY CYCLE — read convexity" : (gCurve.eRes > 45 ? "● BUILDING · healthy (residual " + str.tostring(math.round(gCurve.eRes)) + "%)" : "● BUILDING · weakening (residual " + str.tostring(math.round(gCurve.eRes)) + "%)"), text_color = _campaign == "TERMINAL" ? #fbbf24 : (gCurve.eRes > 45 ? #34d399 : #fb923c), text_size = size.small, text_halign = text.align_left)
-        table.cell(campaign, 1, 9, "", text_size = size.small)
 
 if barstate.islast
     f_drawCampaign()
@@ -2394,7 +2392,6 @@ if barstate.islast and showCurve
     table.cell(curveT, 0, 7, "Maturity", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(curveT, 1, 7, f_gauge(gCurve.maturity) + " " + str.tostring(math.round(gCurve.maturity)) + "%", text_color = #e2e8f0, text_size = size.small)
     table.cell(curveT, 0, 8, "energy can't travel straight → it curves", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 8, "", text_size = size.small)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CURVE STACK (own islast block) — the nested curve family, parent (top) to
@@ -2473,8 +2470,13 @@ if barstate.islast and showCurve
     bool   _phaseAgree = _ownState != "—" and (str.contains(_ownState, "Expansion") == str.contains(ie1a_currentPhase, "Expansion")) and (str.contains(_ownState, "Retracement") == str.contains(ie1a_currentPhase, "Retracement"))
     string _ownLoc = (na(_ownOrig) or na(_ownExt)) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " → " + str.tostring(math.round_to_mintick(_ownExt)) + " → " + str.tostring(math.round_to_mintick(close))
     float  _retrFromX = (na(_ownOrig) or na(_ownExt) or _ownExt == _ownOrig) ? na : math.abs(_ownExt - close) / math.abs(_ownExt - _ownOrig) * 100.0
+    // resolve the tree into ONE tradeable direction: curve alive → trade WITH the
+    // owner; curve dead → FLIP to the counter side; weakening middle → wait / manage.
+    int    _tradeDir = (_ownDirT == 0 or (_life > 32.0 and _life < 45.0)) ? 0 : _life <= 32.0 ? -_ownDirT : _ownDirT
+    string _tradeTx  = _tradeDir != 0 ? (_tradeDir == 1 ? "▲ LONG" : "▼ SHORT") + (_tradeDir != _ownDirT ? "  flip" : "  with curve") : _ownDirT == 0 ? "○ NO CURVE — WAIT" : "○ WAIT / MANAGE · owner " + _odTx
+    color  _tradeCol = _tradeDir == 1 ? #34d399 : _tradeDir == -1 ? #fb7185 : #fbbf24
     table.cell(topT, 4, 0, "◤ CURVE TREE ▌ " + _ctxLbl + " root · recursion " + _liveDot, text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 5, 0, _odTx + "  d" + str.tostring(_ownDepthT), text_color = _ownDirT == 1 ? #34d399 : _ownDirT == -1 ? #fb7185 : #94a3b8, text_size = size.normal, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(topT, 5, 0, "▶ " + _tradeTx, text_color = _tradeCol, text_size = size.normal, bgcolor = color.new(#0c4a6e, 12))
     table.cell(topT, 4, 1, "Recursion depth / budget", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 5, 1, str.tostring(_treeDepth) + " / " + str.tostring(_curveBudgetDepth) + (gCurve.compress >= 75 ? "  (failure swing)" : gCurve.compress >= 50 ? "  (compressed)" : gCurve.compress >= 25 ? "  (medium)" : "  (wide)"), text_color = #c4b5fd, text_size = size.small)
     table.cell(topT, 4, 2, "Live curve nodes", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
