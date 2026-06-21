@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-v60sole"
+#define OMEGA_VERSION                "1.0.0-v72port"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -6185,6 +6185,1145 @@ OmegaBelief     g_belief;
 OmegaLiquidity  g_liquidity;
 
 //==================================================================
+//= MODULE: V72/ERF (Phase V72.1 — Energy Resolution Framework gates)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §7.4 — wraps EDE/RE/EAE outputs into the readiness  |
+//|  + entry gate the V72 decision layer consumes:                   |
+//|    erf_activeDissipation, erf_suppressRotation                   |
+//|    erf_confidence, erf_dissipationConfidence                     |
+//|    erf_tradeReadiness  (0..100)                                  |
+//|    erf_entryGate       (bool — DOE consumes)                     |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_ERF_MQH__
+#define __OMEGA_V72_ERF_MQH__
+
+class OmegaERF
+  {
+public:
+   bool   activeDissipation;
+   bool   suppressRotation;
+   double confidence;
+   double dissipationConfidence;
+   double tradeReadiness;
+   bool   entryGate;
+   double entryThreshold;     // default 45 per spec
+
+                     OmegaERF()
+     {
+      activeDissipation = false; suppressRotation = false;
+      confidence = 0.0; dissipationConfidence = 0.0;
+      tradeReadiness = 0.0; entryGate = false;
+      entryThreshold = 45.0;
+     }
+
+   void Init(double threshold) { entryThreshold = threshold; }
+
+   void Update(const OmegaEnergy &energy, const OmegaEngine1A &engine1A,
+                int eligN, double dissipationProgress, int edeState,
+                double recursiveCompletion)
+     {
+      // erf_activeDissipation: messy price during dissipation
+      activeDissipation = (engine1A.family == "Expansion" || engine1A.family == "Retracement")
+                          && energy.dissipatedEnergy > 30.0;
+      // erf_suppressRotation — preserves Letra gate semantics
+      suppressRotation = activeDissipation && edeState >= 2 && edeState <= 4;
+      // confidence = energyState-term + resolution-term + attractorScore*0.30
+      double estTerm = energy.resCode == 2 ? 30.0 : energy.resCode == 1 ? 20.0 : 10.0;
+      double resTerm = energy.residualEnergyScore < 30.0 ? 30.0 :
+                       energy.residualEnergyScore < 60.0 ? 20.0 : 10.0;
+      confidence = MathMin(100.0, estTerm + resTerm + energy.primaryAttractorScore * 0.30);
+      dissipationConfidence = (activeDissipation ? 50.0 : 0.0) + dissipationProgress * 0.50;
+
+      // erf_tradeReadiness:
+      //   resolution-base (RES 40 / PART 25 / UNRES 10)
+      //   + recursiveCompletion * 0.25
+      //   + (100 - residual) * 0.20
+      //   + erf_confidence * 0.15
+      double resBase = energy.resCode == 2 ? 40.0 : energy.resCode == 1 ? 25.0 : 10.0;
+      tradeReadiness = MathMin(100.0,
+                       resBase
+                       + recursiveCompletion * 0.25
+                       + (100.0 - energy.residualEnergyScore) * 0.20
+                       + confidence * 0.15);
+      entryGate = (tradeReadiness >= entryThreshold);
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("readiness=%.0f gate=%s conf=%.0f diss=%.0f%%",
+                           tradeReadiness, entryGate ? "OPEN" : "BLOCKED",
+                           confidence, dissipationConfidence);
+     }
+  };
+
+#endif // __OMEGA_V72_ERF_MQH__
+
+//==================================================================
+//= MODULE: V72/RIE  (Phase V72.2 — Rotation Intelligence Engine 2)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §9 — control-transfer probability detector.         |
+//|  Reads energy + observation scores; never assigns lifecycle.     |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_RIE_MQH__
+#define __OMEGA_V72_RIE_MQH__
+
+class OmegaRIE
+  {
+public:
+   double rot_pressure;
+   double rot_controlStability;
+   double rot_transferProbability;
+   double rot_emergingWaveStrength;
+   string rot_state;   // STABLE / SOFTENING / CONTESTED / TRANSFER_IMMINENT
+   string rot_controlDirective;
+
+                     OmegaRIE()
+     {
+      rot_pressure = rot_controlStability = 0.0;
+      rot_transferProbability = rot_emergingWaveStrength = 0.0;
+      rot_state = "STABLE"; rot_controlDirective = "—";
+     }
+
+   void Update(const OmegaState &state, OmegaCurve &curve,
+                const OmegaEnergy &energy, const OmegaEngine1A &engine1A,
+                int edeState, double convexityScore)
+     {
+      // Use existing supporting fields as proxies for obs_* scores
+      double expansionScore = state.supporting.forceScore;
+      double decayScore     = 100.0 - energy.residualEnergyScore;
+      double absorptionScore = state.supporting.compression > 60.0 ? state.supporting.compression : state.supporting.compression * 0.6;
+      double liquidityScore = state.supporting.regime > 0 ? 30.0 : 50.0;
+      double eff = state.supporting.forceScore / 100.0;
+      double effThresh = 0.65;
+
+      // rot_pressure
+      rot_pressure = MathMin(100.0,
+                      decayScore * 0.35
+                      + absorptionScore * 0.30
+                      + (convexityScore > 40.0 ? convexityScore * 0.20 : 0.0)
+                      + (liquidityScore > 50.0 ? 15.0 : 0.0));
+      // rot_controlStability
+      rot_controlStability = MathMin(100.0,
+                              expansionScore * 0.40
+                              + (eff > effThresh ? 30.0 : eff > effThresh * 0.7 ? 15.0 : 0.0)
+                              + (edeState <= 2 ? 30.0 : edeState <= 3 ? 15.0 : 0.0));
+      // rot_transferProbability
+      rot_transferProbability = MathMin(100.0,
+                                 rot_pressure * 0.50
+                                 + (100.0 - rot_controlStability) * 0.30
+                                 + (energy.resCode == 0 ? 20.0 : energy.resCode == 1 ? 10.0 : 0.0));
+      // rot_emergingWaveStrength
+      rot_emergingWaveStrength = MathMin(100.0,
+                                  decayScore * 0.40
+                                  + (convexityScore > 25.0 ? convexityScore * 0.30 : 0.0)
+                                  + (eff < effThresh && absorptionScore > 40.0 ? 20.0 : 0.0));
+      // rot_state
+      rot_state = rot_transferProbability >= 75.0 ? "TRANSFER_IMMINENT"
+                : rot_transferProbability >= 50.0 ? "CONTESTED"
+                : rot_transferProbability >= 25.0 ? "SOFTENING" : "STABLE";
+      rot_controlDirective = rot_state == "TRANSFER_IMMINENT" ? "ROTATION ARMED"
+                            : rot_state == "CONTESTED" ? "control contested"
+                            : "trend intact";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("press=%.0f stab=%.0f xfer=%.0f emerg=%.0f · %s",
+                           rot_pressure, rot_controlStability, rot_transferProbability,
+                           rot_emergingWaveStrength, rot_state);
+     }
+  };
+
+#endif // __OMEGA_V72_RIE_MQH__
+
+//==================================================================
+//= MODULE: V72/MCE  (Phase V72.3 — 9-TF Consensus Engine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §10.1 — canonical 9-TF consensus.                   |
+//|  Stack: Monthly · Weekly · Daily · H4 · H1 · M30 · M15 · M5 · M1 |
+//|  alignment + per-tier subsets (HTF / MTF / Exec)                 |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_MCE_MQH__
+#define __OMEGA_V72_MCE_MQH__
+
+#define OMEGA_MCE_TFS 9
+
+class OmegaMCE
+  {
+public:
+   int    tf_dir[OMEGA_MCE_TFS];           // -1 / 0 / +1
+   double tf_lifecycle[OMEGA_MCE_TFS];      // 0..100 progress
+   double tf_confidence[OMEGA_MCE_TFS];
+
+   double mce_alignmentScore;
+   double mce_htfAlignmentScore;
+   double mce_mtfAlignmentScore;
+   double mce_execAlignmentScore;
+
+   string mce_htfNarrative;
+   string mce_mtfNarrative;
+   string mce_execNarrative;
+   string mce_execReadiness;
+
+                     OmegaMCE()
+     {
+      ArrayInitialize(tf_dir, 0);
+      ArrayInitialize(tf_lifecycle, 0.0);
+      ArrayInitialize(tf_confidence, 0.0);
+      mce_alignmentScore = mce_htfAlignmentScore = 0.0;
+      mce_mtfAlignmentScore = mce_execAlignmentScore = 0.0;
+      mce_htfNarrative = mce_mtfNarrative = mce_execNarrative = "—";
+      mce_execReadiness = "developing";
+     }
+
+   //--- Lifecycle progress map by phase string (F60 vocabulary).
+   double LifecycleProgress(string phase) const
+     {
+      if(StringFind(phase, "Point 4")             >= 0) return 5.0;
+      if(StringFind(phase, "Expansion Pre-Conv")  >= 0) return 35.0;
+      if(StringFind(phase, "Expansion Induction") >= 0) return 50.0;
+      if(StringFind(phase, "Expansion Liquidity") >= 0) return 65.0;
+      if(StringFind(phase, "Expansion")           >= 0) return 20.0;
+      if(StringFind(phase, "New High")            >= 0) return 80.0;
+      if(StringFind(phase, "New Low")             >= 0) return 80.0;
+      if(StringFind(phase, "Transition")          >= 0) return 70.0;
+      if(StringFind(phase, "HTF Flip Zone")       >= 0) return 40.0;
+      if(StringFind(phase, "Induction")           >= 0) return 25.0;
+      if(StringFind(phase, "Liquidation")         >= 0) return 15.0;
+      if(StringFind(phase, "Liquidity")           >= 0) return 15.0;
+      if(StringFind(phase, "Terminal Curve")      >= 0) return 92.0;
+      if(StringFind(phase, "Demand Return")       >= 0) return 90.0;
+      if(StringFind(phase, "Supply Return")       >= 0) return 90.0;
+      if(StringFind(phase, "Retracement")         >= 0) return 55.0;
+      if(StringFind(phase, "Absorption")          >= 0) return 70.0;
+      return 50.0;
+     }
+
+   //--- Read direction from a per-TF curve state.
+   void ReadTF(int idx, ENUM_TIMEFRAMES tf, OmegaCurve &curve, string phase)
+     {
+      // Map indices: 0=MN 1=W 2=D 3=H4 4=H1 5=M30 6=M15 7=M5 8=M1
+      // OMEGA's curve has tfM1/M3/M5/M15/H1/H4. M30/W/MN need fallback derivations.
+      if(idx <= 8 && idx >= 0)
+        {
+         tf_lifecycle[idx]  = LifecycleProgress(phase);
+         tf_confidence[idx] = 60.0;
+         double c0 = iClose(_Symbol, tf, 0);
+         double c5 = iClose(_Symbol, tf, 5);
+         tf_dir[idx] = c0 > c5 ? 1 : c0 < c5 ? -1 : 0;
+        }
+     }
+
+   void Update(OmegaCurve &curve, string canonicalPhase, int chartDir)
+     {
+      // Read all 9 timeframes
+      ReadTF(0, PERIOD_MN1, curve, canonicalPhase);
+      ReadTF(1, PERIOD_W1,  curve, canonicalPhase);
+      ReadTF(2, PERIOD_D1,  curve, canonicalPhase);
+      ReadTF(3, PERIOD_H4,  curve, canonicalPhase);
+      ReadTF(4, PERIOD_H1,  curve, canonicalPhase);
+      ReadTF(5, PERIOD_M30, curve, canonicalPhase);
+      ReadTF(6, PERIOD_M15, curve, canonicalPhase);
+      ReadTF(7, PERIOD_M5,  curve, canonicalPhase);
+      ReadTF(8, PERIOD_M1,  curve, canonicalPhase);
+
+      // Per-TF lifecycle from curve states (override generic phase-based estimate)
+      tf_lifecycle[3] = curve.tfH4.waveProgress;
+      tf_lifecycle[4] = curve.tfH1.waveProgress;
+      tf_lifecycle[6] = curve.tfM15.waveProgress;
+      tf_lifecycle[7] = curve.tfM5.waveProgress;
+      tf_lifecycle[8] = curve.tfM1.waveProgress;
+      tf_dir[3] = curve.tfH4.dir;
+      tf_dir[4] = curve.tfH1.dir;
+      tf_dir[6] = curve.tfM15.dir;
+      tf_dir[7] = curve.tfM5.dir;
+      tf_dir[8] = curve.tfM1.dir;
+
+      // alignment scores
+      int sameAll = 0;
+      for(int i = 0; i < OMEGA_MCE_TFS; i++) if(tf_dir[i] == chartDir && chartDir != 0) sameAll++;
+      mce_alignmentScore = (double)sameAll / OMEGA_MCE_TFS * 100.0;
+
+      // HTF — top 5 (MN/W/D/H4/H1)
+      int htfSame = 0; int htfCnt = 0;
+      for(int i = 0; i <= 4; i++)
+        {
+         if(tf_dir[i] != 0) { htfCnt++; if(tf_dir[i] == chartDir) htfSame++; }
+        }
+      mce_htfAlignmentScore = htfCnt > 0 ? (double)htfSame / htfCnt * 100.0 : 50.0;
+
+      // MTF — middle 3 (H1/M30/M15)
+      int mtfSame = 0; int mtfCnt = 0;
+      for(int i = 4; i <= 6; i++)
+        {
+         if(tf_dir[i] != 0) { mtfCnt++; if(tf_dir[i] == chartDir) mtfSame++; }
+        }
+      mce_mtfAlignmentScore = mtfCnt > 0 ? (double)mtfSame / mtfCnt * 100.0 : 50.0;
+
+      // Exec — bottom 3 (M30/M15/M5/M1 lower 3)
+      int exSame = 0; int exCnt = 0;
+      for(int i = 6; i <= 8; i++)
+        {
+         if(tf_dir[i] != 0) { exCnt++; if(tf_dir[i] == chartDir) exSame++; }
+        }
+      mce_execAlignmentScore = exCnt > 0 ? (double)exSame / exCnt * 100.0 : 50.0;
+
+      // Narratives (rough mapping)
+      mce_htfNarrative = (mce_htfAlignmentScore >= 80.0 && chartDir != 0)
+                         ? (chartDir == 1 ? "HTF Bull Continuation" : "HTF Bear Continuation")
+                         : (mce_htfAlignmentScore >= 60.0)
+                            ? "HTF Trend Intact"
+                            : (mce_htfAlignmentScore < 40.0)
+                               ? "HTF Contested"
+                               : "HTF Rotation Developing";
+      mce_mtfNarrative = mce_mtfAlignmentScore >= 60.0 ? "MTF aligned" :
+                          mce_mtfAlignmentScore < 40.0 ? "MTF contested" : "MTF developing";
+      mce_execNarrative = mce_execAlignmentScore >= 60.0
+                          ? (chartDir == 1 ? "Execution Aligned — Long Window"
+                             : chartDir == -1 ? "Execution Aligned — Short Window"
+                             : "Execution Developing")
+                          : mce_execAlignmentScore < 40.0
+                             ? "Execution Conflict — Wait"
+                             : "Execution Developing";
+      mce_execReadiness = mce_execAlignmentScore >= 60.0 ? "ready" :
+                           mce_execAlignmentScore < 40.0 ? "wait" : "developing";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("align=%.0f htf=%.0f mtf=%.0f exec=%.0f · %s",
+                           mce_alignmentScore, mce_htfAlignmentScore,
+                           mce_mtfAlignmentScore, mce_execAlignmentScore,
+                           mce_execReadiness);
+     }
+  };
+
+#endif // __OMEGA_V72_MCE_MQH__
+
+//==================================================================
+//= MODULE: V72/NE  (Phase V72.4 — Narrative Engine · single dominant)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §12 — exactly one dominant narrative active.         |
+//|  Reads MCE consensus + IE1A lifecycle + RIE transfer prob.        |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_NE_MQH__
+#define __OMEGA_V72_NE_MQH__
+
+class OmegaNE
+  {
+public:
+   string ne_dominantNarrative;
+   double ne_narrativeStrength;
+   bool   ne_narrativeConflict;
+
+                     OmegaNE()
+     {
+      ne_dominantNarrative = "No Clear Narrative";
+      ne_narrativeStrength = 0.0;
+      ne_narrativeConflict = false;
+     }
+
+   void Update(int chartDir, const OmegaMCE &mce, const OmegaRIE &rie,
+                const OmegaEngine1A &engine1A, const OmegaEnergy &energy)
+     {
+      string ph = engine1A.currentPhase;
+      double htfAlign = mce.mce_htfAlignmentScore;
+      double xfer     = rie.rot_transferProbability;
+      bool   isExpFamily   = (engine1A.family == "Expansion");
+      bool   isRetrFamily  = (engine1A.family == "Retracement" || engine1A.family == "Liquidation");
+      bool   isClimaxFamily = (engine1A.family == "Climax");
+      bool   isReturn      = (StringFind(ph, "Demand Return") >= 0 || StringFind(ph, "Supply Return") >= 0);
+
+      // Bullish Continuation
+      if(chartDir == 1 && htfAlign >= 70.0 && (isExpFamily || isClimaxFamily || isReturn) && xfer < 40.0)
+         ne_dominantNarrative = "Bullish Continuation";
+      // Bearish Continuation
+      else if(chartDir == -1 && htfAlign >= 70.0 && (isExpFamily || isClimaxFamily || isReturn) && xfer < 40.0)
+         ne_dominantNarrative = "Bearish Continuation";
+      // Bullish Pullback
+      else if(chartDir == 1 && htfAlign >= 55.0 && isRetrFamily)
+         ne_dominantNarrative = "Bullish Pullback";
+      // Bearish Pullback
+      else if(chartDir == -1 && htfAlign >= 55.0 && isRetrFamily)
+         ne_dominantNarrative = "Bearish Pullback";
+      // Bullish Rotation
+      else if(xfer >= 65.0 && chartDir == -1 && htfAlign >= 50.0)
+         ne_dominantNarrative = "Bullish Rotation";
+      // Bearish Rotation
+      else if(xfer >= 65.0 && chartDir == 1 && htfAlign >= 50.0)
+         ne_dominantNarrative = "Bearish Rotation";
+      // Range Development
+      else if(rie.rot_state == "CONTESTED"
+              && MathAbs(mce.mce_alignmentScore - 50.0) < 15.0
+              && energy.resCode == 0)
+         ne_dominantNarrative = "Range Development";
+      else
+         ne_dominantNarrative = "No Clear Narrative";
+
+      // Narrative strength
+      ne_narrativeStrength = mce.mce_alignmentScore * 0.40
+                            + rie.rot_controlStability * 0.30
+                            + (energy.resCode == 2 ? 30.0
+                               : energy.resCode == 1 ? 15.0 : 0.0);
+
+      // Conflict — simplified: high transfer prob during continuation
+      ne_narrativeConflict = (StringFind(ne_dominantNarrative, "Continuation") >= 0
+                              && xfer >= 50.0);
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("%s · str=%.0f%s",
+                           ne_dominantNarrative, ne_narrativeStrength,
+                           ne_narrativeConflict ? " (CONFLICT)" : "");
+     }
+  };
+
+#endif // __OMEGA_V72_NE_MQH__
+
+//==================================================================
+//= MODULE: V72/FRZ (Phase V72.5 — Future Return Zone Engine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §8 — FRZ engine + ownership + FRZ↔ERF unifier.      |
+//|  Detects return-probable price zones from FU + IMB + LIQ + DISP. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_FRZ_MQH__
+#define __OMEGA_V72_FRZ_MQH__
+
+#define OMEGA_FRZ_MAX 32
+
+class OmegaFRZ
+  {
+private:
+   double m_zMid[OMEGA_FRZ_MAX];
+   double m_zHi[OMEGA_FRZ_MAX];
+   double m_zLo[OMEGA_FRZ_MAX];
+   int    m_zDir[OMEGA_FRZ_MAX];
+   double m_zScore[OMEGA_FRZ_MAX];
+   string m_zClass[OMEGA_FRZ_MAX];   // Weak/Moderate/Strong/Exceptional
+   string m_zTier[OMEGA_FRZ_MAX];     // T1/T2/T3/T4
+   string m_zStatus[OMEGA_FRZ_MAX];   // Open/Partial/Mitigated/Invalidated
+   string m_zOwner[OMEGA_FRZ_MAX];    // L0 PRIMARY / L1 CHILD / L2 HTF / L3 MICRO
+   datetime m_zBirth[OMEGA_FRZ_MAX];
+   int    m_count;
+
+public:
+   double frz_bestScore;
+   string frz_bestClass;
+   string frz_bestTier;
+   string frz_bestOwner;
+   string frz_bestStatus;
+   double frz_bestZoneMid;
+   int    frz_bestDir;
+   int    frz_activeCount;
+   int    frz_bullCount;
+   int    frz_bearCount;
+   bool   frz_inProximity;
+   double frz_distanceToZone;
+   double frz_confidence;
+   // FRZ↔ERF unifier
+   double frz_resolutionScore;
+   double frz_residualEnergy;
+   double frz_attractorWeight;
+   bool   frz_attractorConvergence;
+
+                     OmegaFRZ() { Reset(); }
+
+   void Reset()
+     {
+      ArrayInitialize(m_zMid, 0.0);
+      ArrayInitialize(m_zScore, 0.0);
+      ArrayInitialize(m_zDir, 0);
+      ArrayInitialize(m_zHi, 0.0);
+      ArrayInitialize(m_zLo, 0.0);
+      m_count = 0;
+      frz_bestScore = 0.0; frz_bestClass = "—"; frz_bestTier = "—";
+      frz_bestOwner = "—"; frz_bestStatus = "—"; frz_bestZoneMid = 0.0;
+      frz_bestDir = 0; frz_activeCount = 0; frz_bullCount = 0; frz_bearCount = 0;
+      frz_inProximity = false; frz_distanceToZone = 0.0; frz_confidence = 0.0;
+      frz_resolutionScore = 0.0; frz_residualEnergy = 0.0;
+      frz_attractorWeight = 0.0; frz_attractorConvergence = false;
+     }
+
+   //--- Spawn a zone from a participant zone if scoring qualifies.
+   void SpawnFromParticipant(int dir, double mid, double atrSize,
+                              bool fuPresent, bool dispPresent,
+                              bool liqSwept, bool fvgPresent)
+     {
+      if(m_count >= OMEGA_FRZ_MAX || mid <= 0 || atrSize <= 0) return;
+      // Section 17 scoring: each component = 25
+      int score = 0;
+      if(fuPresent)    score += 25;
+      if(fvgPresent)   score += 25;
+      if(liqSwept)     score += 25;
+      if(dispPresent)  score += 25;
+      if(score < 26) return;  // frz_minScore floor
+
+      // Dedup: skip if >50% overlap with existing zone
+      double newHi = mid + atrSize * 0.3;
+      double newLo = mid - atrSize * 0.3;
+      for(int i = 0; i < m_count; i++)
+        {
+         double oHi = m_zHi[i]; double oLo = m_zLo[i];
+         if(oHi <= 0 || oLo <= 0) continue;
+         double overlap = MathMin(newHi, oHi) - MathMax(newLo, oLo);
+         double mySize = newHi - newLo;
+         if(mySize > 0 && (overlap / mySize) > 0.5) return;
+        }
+
+      int slot = m_count;
+      m_zMid[slot] = mid;
+      m_zHi[slot]  = newHi;
+      m_zLo[slot]  = newLo;
+      m_zDir[slot] = dir;
+      m_zScore[slot] = (double)score;
+      m_zClass[slot] = score >= 76 ? "Exceptional"
+                      : score >= 51 ? "Strong"
+                      : score >= 26 ? "Moderate" : "Weak";
+      // Tier
+      if(score >= 76)        m_zTier[slot] = "T1";
+      else if(score >= 51)   m_zTier[slot] = "T2";
+      else if(fuPresent)     m_zTier[slot] = "T3";
+      else                    m_zTier[slot] = "T4";
+      m_zStatus[slot] = "Open";
+      m_zOwner[slot]  = "L0 PRIMARY";
+      m_zBirth[slot]  = TimeCurrent();
+      m_count++;
+     }
+
+   //--- Per-bar lifecycle update + best-zone refresh.
+   void Update(OmegaCurve &curve, const OmegaEnergy &energy,
+                const OmegaParticipants &participants,
+                int chartDir, double chartATR)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // Lifecycle: Open → Partial → Mitigated → Invalidated
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_zStatus[i] == "Invalidated" || m_zStatus[i] == "Mitigated") continue;
+         double hi = m_zHi[i]; double lo = m_zLo[i]; int d = m_zDir[i];
+         if(hi <= 0 || lo <= 0) continue;
+         double curHi = iHigh(_Symbol, _Period, 1);
+         double curLo = iLow (_Symbol, _Period, 1);
+         double cClose = iClose(_Symbol, _Period, 1);
+
+         // Demand zones (dir=+1) — invalid if close < lo
+         // Supply zones (dir=-1) — invalid if close > hi
+         if(d == 1 && cClose < lo - chartATR * 0.1)        m_zStatus[i] = "Invalidated";
+         else if(d == -1 && cClose > hi + chartATR * 0.1)  m_zStatus[i] = "Invalidated";
+         else if(curHi >= lo && curLo <= hi && cClose >= lo && cClose <= hi)
+            m_zStatus[i] = "Mitigated";
+         else if(curHi >= lo && curLo <= hi)
+            m_zStatus[i] = (m_zStatus[i] == "Open") ? "Partial" : m_zStatus[i];
+        }
+
+      // Aggregate counters + best zone
+      frz_activeCount = 0; frz_bullCount = 0; frz_bearCount = 0;
+      frz_bestScore = 0.0; int bestIdx = -1;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_zStatus[i] == "Invalidated" || m_zStatus[i] == "Mitigated") continue;
+         frz_activeCount++;
+         if(m_zDir[i] == 1)  frz_bullCount++;
+         if(m_zDir[i] == -1) frz_bearCount++;
+         if(m_zScore[i] > frz_bestScore) { frz_bestScore = m_zScore[i]; bestIdx = i; }
+        }
+      if(bestIdx >= 0)
+        {
+         frz_bestClass    = m_zClass[bestIdx];
+         frz_bestTier     = m_zTier[bestIdx];
+         frz_bestOwner    = m_zOwner[bestIdx];
+         frz_bestStatus   = m_zStatus[bestIdx];
+         frz_bestZoneMid  = m_zMid[bestIdx];
+         frz_bestDir      = m_zDir[bestIdx];
+         frz_distanceToZone = (chartATR > 0) ? MathAbs(bid - frz_bestZoneMid) / chartATR : 0.0;
+         frz_inProximity  = (frz_distanceToZone < 2.0);
+         double statusBonus = frz_bestStatus == "Open" ? 30.0 : frz_bestStatus == "Partial" ? 15.0 : 0.0;
+         double tierBonus   = frz_bestTier == "T1" ? 30.0 : frz_bestTier == "T2" ? 20.0 : 10.0;
+         frz_confidence   = MathMin(100.0, frz_bestScore * 0.40 + statusBonus + tierBonus);
+        }
+      else
+        {
+         frz_bestClass = frz_bestTier = frz_bestOwner = frz_bestStatus = "—";
+         frz_bestZoneMid = 0.0; frz_bestDir = 0;
+         frz_distanceToZone = 0.0; frz_inProximity = false; frz_confidence = 0.0;
+        }
+
+      // FRZ↔ERF unifier (master spec §8.4)
+      double recComp = energy.resCode == 2 ? 100.0 : energy.resCode == 1 ? 50.0 : 0.0;
+      frz_resolutionScore = energy.resCode == 2 ? 90.0
+                            : energy.resCode == 1 ? (50.0 + recComp * 0.40)
+                            : (20.0 + (energy.dissipatedEnergy * 0.30));
+      frz_residualEnergy = MathMax(0.0, 100.0 - frz_resolutionScore);
+      double statusBonus2 = frz_bestStatus == "Open" ? 20.0 : frz_bestStatus == "Partial" ? 10.0 : 0.0;
+      frz_attractorWeight = frz_residualEnergy * 0.50 + frz_bestScore * 0.30 + statusBonus2;
+      // Convergence: best zone within 0.5 ATR of EAE primary attractor
+      frz_attractorConvergence = false;
+      if(frz_activeCount > 0 && energy.primaryAttractorPrice > 0 && chartATR > 0)
+        {
+         double dist = MathAbs(energy.primaryAttractorPrice - frz_bestZoneMid) / chartATR;
+         frz_attractorConvergence = (dist < 0.5);
+        }
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("count=%d best=%.0f(%s/%s/%s) prox=%s dist=%.1fATR conv=%s",
+                           frz_activeCount, frz_bestScore, frz_bestClass, frz_bestTier,
+                           frz_bestStatus, frz_inProximity ? "Y" : "N",
+                           frz_distanceToZone,
+                           frz_attractorConvergence ? "YES" : "no");
+     }
+  };
+
+#endif // __OMEGA_V72_FRZ_MQH__
+
+//==================================================================
+//= MODULE: V72/TQE  (Phase V72.6 — Trade Qualification Engine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §13 — A+/A/B/C/D unified quality grade + readiness. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_TQE_MQH__
+#define __OMEGA_V72_TQE_MQH__
+
+class OmegaTQE
+  {
+public:
+   double tqe_rawScore;
+   double tqe_frzQuality;
+   double tqe_liqQuality;
+   string tqe_grade;          // A+ / A / B / C / D
+   bool   tqe_readiness;
+   string tqe_riskLevel;      // LOW / MEDIUM / HIGH
+
+                     OmegaTQE()
+     {
+      tqe_rawScore = tqe_frzQuality = tqe_liqQuality = 0.0;
+      tqe_grade = "D"; tqe_readiness = false; tqe_riskLevel = "HIGH";
+     }
+
+   void Update(double phaseConf, const OmegaERF &erf, const OmegaFRZ &frz,
+                const OmegaMCE &mce, const OmegaRIE &rie,
+                const OmegaLiquidity &liquidity, const OmegaEnergy &energy)
+     {
+      // FRZ quality
+      double tierBonus = frz.frz_bestTier == "T1" ? 40.0
+                        : frz.frz_bestTier == "T2" ? 25.0
+                        : frz.frz_bestTier == "T3" ? 10.0 : 0.0;
+      double statusBonus = frz.frz_bestStatus == "Open" ? 10.0
+                          : frz.frz_bestStatus == "Partial" ? 5.0 : 0.0;
+      tqe_frzQuality = (frz.frz_activeCount > 0)
+                       ? MathMin(100.0, frz.frz_bestScore * 0.50 + tierBonus + statusBonus)
+                       : 0.0;
+      // Liquidity quality
+      tqe_liqQuality = MathMin(100.0,
+                       liquidity.liqHeat * 0.50
+                       + (liquidity.liqSweepOK ? 30.0 : 0.0)
+                       + (liquidity.liqHeat > 70.0 ? 20.0 : 0.0));
+      // Recursive completion (proxy from energy resCode)
+      double recursiveCompletion = energy.resCode == 2 ? 100.0
+                                   : energy.resCode == 1 ? 50.0 : 25.0;
+
+      // raw score
+      tqe_rawScore = phaseConf * 0.25
+                   + erf.confidence * 0.15
+                   + tqe_frzQuality * 0.15
+                   + mce.mce_htfAlignmentScore * 0.20
+                   + recursiveCompletion * 0.10
+                   + tqe_liqQuality * 0.15;
+
+      // grade
+      tqe_grade = tqe_rawScore >= 85.0 ? "A+"
+                : tqe_rawScore >= 72.0 ? "A"
+                : tqe_rawScore >= 58.0 ? "B"
+                : tqe_rawScore >= 42.0 ? "C" : "D";
+
+      // FRZ↔EAE convergence promotes grade by one letter (master spec §8.4)
+      if(frz.frz_attractorConvergence)
+        {
+         if(tqe_grade == "B") tqe_grade = "A";
+         else if(tqe_grade == "C") tqe_grade = "B";
+         else if(tqe_grade == "D") tqe_grade = "C";
+         else if(tqe_grade == "A") tqe_grade = "A+";
+        }
+
+      // readiness
+      tqe_readiness = (phaseConf >= 50.0)
+                      && (erf.confidence >= 40.0)
+                      && (mce.mce_htfAlignmentScore >= 50.0)
+                      && (tqe_grade != "D");
+
+      // risk level
+      tqe_riskLevel = (rie.rot_transferProbability > 65.0 || energy.resCode == 0) ? "HIGH"
+                    : (rie.rot_transferProbability > 35.0 || tqe_rawScore < 60.0) ? "MEDIUM" : "LOW";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("%s · raw=%.0f · ready=%s · risk=%s · frzQ=%.0f liqQ=%.0f",
+                           tqe_grade, tqe_rawScore, tqe_readiness ? "Y" : "N",
+                           tqe_riskLevel, tqe_frzQuality, tqe_liqQuality);
+     }
+  };
+
+#endif // __OMEGA_V72_TQE_MQH__
+
+//==================================================================
+//= MODULE: V72/IE2 (Phase V72.7 — Invalidation Engine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §14.2 — pre-computed stop prices.                   |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_IE2_MQH__
+#define __OMEGA_V72_IE2_MQH__
+
+class OmegaIE2
+  {
+public:
+   double inv_bullOriginPrice;
+   double inv_bearOriginPrice;
+   double inv_demandFailPrice;
+   double inv_supplyFailPrice;
+   double inv_activeStop;
+   bool   inv_invalidated;
+   double inv_riskInPts;
+   double inv_riskInATR;
+
+                     OmegaIE2()
+     {
+      inv_bullOriginPrice = inv_bearOriginPrice = 0.0;
+      inv_demandFailPrice = inv_supplyFailPrice = 0.0;
+      inv_activeStop = 0.0;
+      inv_invalidated = false;
+      inv_riskInPts = inv_riskInATR = 0.0;
+     }
+
+   void Update(OmegaCurve &curve, int direction, double chartATR)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      int oi = curve.tree.ownerIndex;
+      double origin = (oi >= 0) ? curve.tree.tree[oi].origin : 0.0;
+      // Bull/bear origin failure prices
+      if(direction == 1 && origin > 0)
+         inv_bullOriginPrice = origin - chartATR * 0.25;
+      if(direction == -1 && origin > 0)
+         inv_bearOriginPrice = origin + chartATR * 0.25;
+      // Demand/supply fail proxies (use chart-TF flip zone)
+      CurveState *chart = curve.ChartTfState();
+      if(chart != NULL)
+        {
+         if(chart.fb > 0 && direction == 1) inv_demandFailPrice = chart.fb - chartATR * 0.10;
+         if(chart.ft > 0 && direction == -1) inv_supplyFailPrice = chart.ft + chartATR * 0.10;
+        }
+      // Active stop
+      if(direction == 1)
+        {
+         double a = inv_bullOriginPrice;
+         double b = inv_demandFailPrice > 0 ? inv_demandFailPrice : a;
+         inv_activeStop = (a > 0 && b > 0) ? MathMin(a, b) : (a > 0 ? a : b);
+        }
+      else if(direction == -1)
+        {
+         double a = inv_bearOriginPrice;
+         double b = inv_supplyFailPrice > 0 ? inv_supplyFailPrice : a;
+         inv_activeStop = (a > 0 && b > 0) ? MathMax(a, b) : (a > 0 ? a : b);
+        }
+      else
+         inv_activeStop = 0.0;
+
+      inv_invalidated = (inv_activeStop > 0)
+                        && ((direction == 1 && bid < inv_activeStop)
+                          || (direction == -1 && bid > inv_activeStop));
+      inv_riskInPts = (inv_activeStop > 0 && bid > 0) ? MathAbs(bid - inv_activeStop) : 0.0;
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      double atrInPts = (point > 0 && chartATR > 0) ? chartATR / point : 1.0;
+      inv_riskInATR = atrInPts > 0 ? (inv_riskInPts / point) / atrInPts : 0.0;
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("stop=%.5f risk=%.1fATR invalidated=%s",
+                           inv_activeStop, inv_riskInATR,
+                           inv_invalidated ? "YES" : "no");
+     }
+  };
+
+#endif // __OMEGA_V72_IE2_MQH__
+
+//==================================================================
+//= MODULE: V72/TE  (Phase V72.8 — Target Engine · TP1/TP2/TP3)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §14.1 — three priced targets from attractor + FRZ. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_TE_MQH__
+#define __OMEGA_V72_TE_MQH__
+
+class OmegaTE
+  {
+public:
+   double te_tp1, te_tp2, te_tp3;
+   double te_tp1_quality, te_tp2_quality, te_tp3_quality;
+   double te_targetConfidence;
+   string te_expectedPath;     // Direct / Retracement First / Range Then Breakout
+   double te_rr_tp1, te_rr_tp2, te_rr_tp3;
+   bool   te_rrGate;            // R:R to TP1 ≥ 1.5
+
+                     OmegaTE()
+     {
+      te_tp1 = te_tp2 = te_tp3 = 0.0;
+      te_tp1_quality = te_tp2_quality = te_tp3_quality = 0.0;
+      te_targetConfidence = 0.0;
+      te_expectedPath = "Direct";
+      te_rr_tp1 = te_rr_tp2 = te_rr_tp3 = 0.0;
+      te_rrGate = false;
+     }
+
+   void Update(const OmegaEnergy &energy, const OmegaFRZ &frz, const OmegaIE2 &ie2,
+                const OmegaMCE &mce, const OmegaRIE &rie,
+                const OmegaEngine1A &engine1A, int direction, double chartATR)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      // TP1 = secondary attractor or nearest high-score FRZ
+      // TP2 = primary attractor
+      // TP3 = tertiary attractor (primary ± 2×ATR) or furthest high-score FRZ
+      te_tp2 = energy.primaryAttractorPrice;
+      // Secondary: not modeled, use FRZ best
+      te_tp1 = (frz.frz_bestZoneMid > 0) ? frz.frz_bestZoneMid : te_tp2;
+      // Tertiary
+      double tertiary = (te_tp2 > 0)
+                        ? (direction == 1 ? te_tp2 + chartATR * 2.0 : te_tp2 - chartATR * 2.0)
+                        : 0.0;
+      te_tp3 = tertiary;
+
+      double recursiveCompletion = energy.resCode == 2 ? 100.0
+                                   : energy.resCode == 1 ? 50.0 : 25.0;
+      te_tp1_quality = MathMin(100.0,
+                       (frz.frz_attractorConvergence ? 40.0 : frz.frz_bestScore * 0.25)
+                       + recursiveCompletion * 0.15
+                       + mce.mce_execAlignmentScore * 0.20);
+      te_tp2_quality = MathMin(100.0,
+                       energy.primaryAttractorScore * 0.50
+                       + energy.residualEnergyScore * 0.30
+                       + mce.mce_htfAlignmentScore * 0.20);
+      te_tp3_quality = MathMin(100.0,
+                       (te_tp3 > 0 ? 40.0 : 20.0)
+                       + (mce.mce_htfAlignmentScore >= 80.0 ? 40.0 : mce.mce_htfAlignmentScore * 0.30));
+      te_targetConfidence = (te_tp1_quality + te_tp2_quality) * 0.5;
+
+      // Expected path
+      string ph = engine1A.currentPhase;
+      bool isReturn = StringFind(ph, "Demand Return") >= 0 || StringFind(ph, "Supply Return") >= 0;
+      te_expectedPath = (energy.resCode == 2 && mce.mce_execAlignmentScore >= 70.0) ? "Direct"
+                      : isReturn                                                     ? "Direct"
+                      : rie.rot_transferProbability > 50.0                           ? "Retracement First"
+                      : energy.resCode == 0                                          ? "Range Then Breakout"
+                      : "Direct";
+
+      // R:R
+      double risk = ie2.inv_riskInPts;
+      if(risk > 0)
+        {
+         double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+         te_rr_tp1 = te_tp1 > 0 ? MathAbs(te_tp1 - bid) / risk : 0.0;
+         te_rr_tp2 = te_tp2 > 0 ? MathAbs(te_tp2 - bid) / risk : 0.0;
+         te_rr_tp3 = te_tp3 > 0 ? MathAbs(te_tp3 - bid) / risk : 0.0;
+        }
+      te_rrGate = (te_rr_tp1 >= 1.5);
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("TP1=%.5f(R:%.1f) TP2=%.5f TP3=%.5f · path=%s · gate=%s",
+                           te_tp1, te_rr_tp1, te_tp2, te_tp3, te_expectedPath,
+                           te_rrGate ? "OPEN" : "BLOCKED");
+     }
+  };
+
+#endif // __OMEGA_V72_TE_MQH__
+
+//==================================================================
+//= MODULE: V72/DOE (Phase V72.9 — Decision Output Engine · CANONICAL)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §15.1 — the SINGLE actionable output.               |
+//|  Resolves the three-competing-directives problem.                |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_DOE_MQH__
+#define __OMEGA_V72_DOE_MQH__
+
+class OmegaDOE
+  {
+public:
+   string doe_bias;              // Strong Bullish / Bullish / Neutral / Bearish / Strong Bearish
+   string doe_action;            // Long / Short / Wait / No Trade
+   double doe_confidence;        // hard-capped 88 (95 on attractor convergence)
+   string doe_tradeType;         // Continuation / Pullback / Rotation / Range / Breakout / Wait
+   double doe_entryMid, doe_entryHigh, doe_entryLow;
+   string doe_entryTrigger;      // Market / Limit / LimitOnRetest
+   string doe_entryQuality;      // mirrors tqe_grade
+
+                     OmegaDOE()
+     {
+      doe_bias = "Neutral"; doe_action = "Wait";
+      doe_confidence = 0.0; doe_tradeType = "Wait";
+      doe_entryMid = doe_entryHigh = doe_entryLow = 0.0;
+      doe_entryTrigger = "Market"; doe_entryQuality = "D";
+     }
+
+   void Update(int direction, const OmegaMCE &mce, const OmegaRIE &rie,
+                const OmegaTQE &tqe, const OmegaERF &erf, const OmegaTE &te,
+                const OmegaIE2 &ie2, const OmegaNE &ne,
+                const OmegaEngine1A &engine1A, const OmegaFRZ &frz,
+                double chartATR)
+     {
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double htfAlign = mce.mce_htfAlignmentScore;
+      double ctlStab  = rie.rot_controlStability;
+      double xfer     = rie.rot_transferProbability;
+      string phase    = engine1A.currentPhase;
+
+      // doe_bias
+      if(direction == 1 && htfAlign >= 75.0 && ctlStab >= 65.0)        doe_bias = "Strong Bullish";
+      else if(direction == 1 && htfAlign >= 50.0)                      doe_bias = "Bullish";
+      else if(direction == -1 && htfAlign >= 75.0 && ctlStab >= 65.0)  doe_bias = "Strong Bearish";
+      else if(direction == -1 && htfAlign >= 50.0)                     doe_bias = "Bearish";
+      else                                                              doe_bias = "Neutral";
+
+      // doe_action — gate ladder per spec
+      bool isDemandReturn = StringFind(phase, "Demand Return") >= 0;
+      bool isSupplyReturn = StringFind(phase, "Supply Return") >= 0;
+      if(!tqe.tqe_readiness)                doe_action = "Wait";
+      else if(!erf.entryGate)               doe_action = "Wait";
+      else if(!te.te_rrGate)                doe_action = "Wait";
+      else if(ie2.inv_invalidated)          doe_action = "No Trade";
+      else if(isDemandReturn && direction == 1)   doe_action = "Long";
+      else if(isSupplyReturn && direction == -1)  doe_action = "Short";
+      else if(xfer >= 75.0 && ne.ne_dominantNarrative == "Bullish Rotation")  doe_action = "Long";
+      else if(xfer >= 75.0 && ne.ne_dominantNarrative == "Bearish Rotation")  doe_action = "Short";
+      else                                  doe_action = "Wait";
+
+      // doe_confidence with humility ceiling (88, or 95 on attractor convergence)
+      double convergenceBonus = frz.frz_attractorConvergence ? 20.0 : tqe.tqe_frzQuality * 0.15;
+      double conf = tqe.tqe_rawScore * 0.40
+                   + mce.mce_alignmentScore * 0.25
+                   + convergenceBonus
+                   + erf.confidence * 0.20;
+      double cap = frz.frz_attractorConvergence ? 95.0 : 88.0;
+      doe_confidence = MathMin(cap, conf);
+
+      // doe_tradeType — derived from NE
+      if(StringFind(ne.ne_dominantNarrative, "Continuation") >= 0)        doe_tradeType = "Continuation";
+      else if(StringFind(ne.ne_dominantNarrative, "Pullback") >= 0)       doe_tradeType = "Pullback";
+      else if(StringFind(ne.ne_dominantNarrative, "Rotation") >= 0)       doe_tradeType = "Rotation";
+      else if(ne.ne_dominantNarrative == "Range Development")             doe_tradeType = "Range";
+      else                                                                 doe_tradeType = "Wait";
+
+      // entry zone
+      if(frz.frz_inProximity && frz.frz_bestDir == direction && frz.frz_bestZoneMid > 0)
+         doe_entryMid = frz.frz_bestZoneMid;
+      else
+         doe_entryMid = bid;
+      doe_entryHigh = doe_entryMid + chartATR * 0.30;
+      doe_entryLow  = doe_entryMid - chartATR * 0.30;
+      doe_entryTrigger = frz.frz_inProximity ? "Limit"
+                       : (isDemandReturn || isSupplyReturn) ? "LimitOnRetest" : "Market";
+      doe_entryQuality = tqe.tqe_grade;
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("%s · %s · conf=%.0f · type=%s · entry=%.5f trigger=%s · qual=%s",
+                           doe_action, doe_bias, doe_confidence, doe_tradeType,
+                           doe_entryMid, doe_entryTrigger, doe_entryQuality);
+     }
+  };
+
+#endif // __OMEGA_V72_DOE_MQH__
+
+//==================================================================
+//= MODULE: V72/Registry  (Phase V72.10 — Wave Registry + DWR)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Master spec §16 — wave identity tracking (parallel arrays).     |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V72_REGISTRY_MQH__
+#define __OMEGA_V72_REGISTRY_MQH__
+
+#define OMEGA_WR_MAX 64
+
+class OmegaWaveRegistry
+  {
+private:
+   long     m_waveId[OMEGA_WR_MAX];
+   long     m_parentId[OMEGA_WR_MAX];
+   long     m_rootId[OMEGA_WR_MAX];
+   datetime m_birthBar[OMEGA_WR_MAX];
+   datetime m_deathBar[OMEGA_WR_MAX];
+   double   m_peakEnergy[OMEGA_WR_MAX];
+   double   m_resolutionScore[OMEGA_WR_MAX];
+   int      m_waveDepth[OMEGA_WR_MAX];
+   int      m_count;
+   long     m_nextId;
+
+public:
+   long     activeWaveId, activeParentId, activeRootId;
+
+                     OmegaWaveRegistry()
+     {
+      ArrayInitialize(m_waveId, 0); ArrayInitialize(m_parentId, 0); ArrayInitialize(m_rootId, 0);
+      ArrayInitialize(m_birthBar, 0); ArrayInitialize(m_deathBar, 0);
+      ArrayInitialize(m_peakEnergy, 0); ArrayInitialize(m_resolutionScore, 0);
+      ArrayInitialize(m_waveDepth, 0);
+      m_count = 0; m_nextId = 1;
+      activeWaveId = activeParentId = activeRootId = 0;
+     }
+
+   long OnSpawn(int depth, double energyAtBirth)
+     {
+      if(m_count >= OMEGA_WR_MAX) return 0;
+      long id = m_nextId++;
+      int slot = m_count;
+      m_waveId[slot] = id;
+      m_parentId[slot] = (depth > 0) ? activeWaveId : 0;
+      m_rootId[slot]   = (depth == 0) ? id : activeRootId;
+      m_birthBar[slot] = TimeCurrent();
+      m_deathBar[slot] = 0;
+      m_peakEnergy[slot] = energyAtBirth;
+      m_resolutionScore[slot] = 0.0;
+      m_waveDepth[slot] = depth;
+      m_count++;
+      activeWaveId = id;
+      activeParentId = m_parentId[slot];
+      activeRootId   = m_rootId[slot];
+      return id;
+     }
+
+   void OnDeath(long id, double resolutionScore)
+     {
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_waveId[i] == id)
+           {
+            m_deathBar[i] = TimeCurrent();
+            m_resolutionScore[i] = resolutionScore;
+            break;
+           }
+        }
+     }
+
+   //--- Update peakEnergy when current energy exceeds last record.
+   void OnEnergyHigh(long id, double currentEnergy)
+     {
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_waveId[i] == id && currentEnergy > m_peakEnergy[i])
+           { m_peakEnergy[i] = currentEnergy; break; }
+        }
+     }
+
+   int Count() const { return m_count; }
+
+   string Snapshot() const
+     {
+      return StringFormat("waves=%d active=%I64d parent=%I64d root=%I64d",
+                           m_count, activeWaveId, activeParentId, activeRootId);
+     }
+  };
+
+class OmegaDWR
+  {
+private:
+   long     m_waveId[OMEGA_WR_MAX];
+   long     m_parentId[OMEGA_WR_MAX];
+   long     m_rootId[OMEGA_WR_MAX];
+   datetime m_startBar[OMEGA_WR_MAX];
+   datetime m_endBar[OMEGA_WR_MAX];
+   double   m_energy[OMEGA_WR_MAX];
+   string   m_resolutionState[OMEGA_WR_MAX];
+   int      m_count;
+   long     m_nextId;
+
+public:
+   long activeDeliveryId;
+
+                     OmegaDWR() { Reset(); }
+
+   void Reset()
+     {
+      ArrayInitialize(m_waveId, 0); ArrayInitialize(m_parentId, 0); ArrayInitialize(m_rootId, 0);
+      ArrayInitialize(m_startBar, 0); ArrayInitialize(m_endBar, 0);
+      ArrayInitialize(m_energy, 0);
+      m_count = 0; m_nextId = 1;
+      activeDeliveryId = 0;
+     }
+
+   void OnDeliveryStart(int edeStateNew, double energyAtBirth, long activeWave)
+     {
+      if(m_count >= OMEGA_WR_MAX) return;
+      if(edeStateNew != 4) return;
+      long id = m_nextId++;
+      int slot = m_count;
+      m_waveId[slot] = id;
+      m_parentId[slot] = activeWave;
+      m_rootId[slot] = activeWave;
+      m_startBar[slot] = TimeCurrent();
+      m_endBar[slot] = 0;
+      m_energy[slot] = energyAtBirth;
+      m_resolutionState[slot] = "UNRESOLVED";
+      m_count++;
+      activeDeliveryId = id;
+     }
+
+   void OnTick(string currentResolutionState)
+     {
+      if(activeDeliveryId == 0) return;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_waveId[i] == activeDeliveryId)
+           {
+            m_resolutionState[i] = currentResolutionState;
+            if(currentResolutionState == "RESOLVED")
+              {
+               m_endBar[i] = TimeCurrent();
+               activeDeliveryId = 0;
+              }
+            break;
+           }
+        }
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("dwr=%d active=%I64d", m_count, activeDeliveryId);
+     }
+  };
+
+#endif // __OMEGA_V72_REGISTRY_MQH__
+
+//==================================================================
+//= V72 file-scope globals (declared early so DOE / Chart /
+//= CampaignPositions can read them without forward-decl issues.)
+//==================================================================
+OmegaERF             g_erf;
+OmegaRIE             g_rie;
+OmegaMCE             g_mce;
+OmegaNE              g_ne;
+OmegaFRZ             g_frz;
+OmegaTQE             g_tqe;
+OmegaIE2             g_ie2;
+OmegaTE              g_te;
+OmegaDOE             g_doe;
+OmegaWaveRegistry    g_wr;
+OmegaDWR             g_dwr;
+
+//==================================================================
 //= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
 //= Source: Include/Chart.mqh
 //==================================================================
@@ -10017,6 +11156,12 @@ input double              InpSenseeiMinConf      = 55.0;              // Senseei
 input bool                InpV60ShowVoice        = true;              // Show Senzo trader-voice on HUD
 input bool                InpV60UseInPanel       = true;              // Use V60 Senseei output in HUD verdict line
 
+input group "═══ V72 Decision Layer (Master Architecture Spec) ═══"
+input double              InpERFEntryThreshold    = 45.0;             // ERF: trade-readiness threshold for entryGate (spec §7.4)
+input bool                InpV72UseDOEAsAuthority  = false;           // DOE gates entry direction (off = Phase 5.6 organism stays sole router; DOE still computed+surfaced)
+input bool                InpV72DOEUsesStops       = true;            // Use IE2 inv_activeStop + TE te_tp1 for SL/TP when DOE routes
+input bool                InpDashAdvancedMode      = false;           // Advanced diagnostic dump in heartbeat (spec §17.2)
+
 //================== GLOBALS =========================================
 OmegaState        g_state;
 OmegaCapital      g_capital;
@@ -10186,6 +11331,15 @@ int OnInit()
    OmegaLogger::LogInfo("V60", StringFormat(
       "V60 perception suite initialised · senseei minConf=%.0f", InpSenseeiMinConf));
 
+   //--- Phase V72 — Decision layer. ERF carries the only init-time tunable
+   //    (its entry-readiness threshold). All other V72 engines are stateless
+   //    per-tick consumers. DOE owns the canonical machine recommendation.
+   g_erf.Init(InpERFEntryThreshold);
+   OmegaLogger::LogInfo("V72", StringFormat(
+      "V72 decision layer online · ERF threshold=%.0f · DOE authority=%s",
+      InpERFEntryThreshold, InpV72UseDOEAsAuthority ? "ON" : "OFF"));
+
+
 //--- 10. News calendar (Phase 7, optional).
    g_news.Load();
 
@@ -10322,6 +11476,40 @@ void OnTick()
       g_senzo.Update(g_senseei, g_state, g_curve, g_engine1A, g_liqg,
                       g_letra, g_network, g_energy, g_state.life);
 
+      //--- Phase V72 (Master Architecture Spec): the decision layer. Runs
+      //    AFTER the V60 perception chain (it consumes V60/Letra outputs)
+      //    and BEFORE the Phase-5 decision engine, so DOE's canonical
+      //    recommendation is fresh when order routing consults it.
+      //    Dependency order: ERF → RIE → MCE → NE → FRZ → IE2 → TE → TQE → DOE.
+      {
+         CurveState *v72chart = g_curve.ChartTfState();
+         double v72ATR  = (v72chart != NULL) ? v72chart.physics.atr : 0.0;
+         if(v72ATR <= 0.0) v72ATR = 1.0;                       // guard downstream /ATR
+         int    v72Dir  = (g_curve.gDir != 0) ? g_curve.gDir : g_curve.tree.ownerDir;
+         // EDE state proxy keyed on energy resolution (1 accum … 6 resolution).
+         int    v72Ede  = (g_energy.resCode == 2) ? 6 : (g_energy.resCode == 1) ? 4 : 2;
+         // Recursive-completion proxy from the curve-tree recursion budget.
+         double v72Rec  = (g_state.supporting.recursionBudget > 0)
+                          ? MathMin(100.0, (double)g_state.supporting.recursionDepth
+                                           / (double)g_state.supporting.recursionBudget * 100.0)
+                          : 50.0;
+         double v72Conv = g_curve.gConvexity;
+         double v72Phc  = g_state.confidence;                   // phase-confidence proxy (Trinity)
+
+         g_erf.Update(g_energy, g_engine1A, g_network.eligibleNodes,
+                       g_energy.dissipatedEnergy, v72Ede, v72Rec);
+         g_rie.Update(g_state, g_curve, g_energy, g_engine1A, v72Ede, v72Conv);
+         g_mce.Update(g_curve, g_engine1A.currentPhase, v72Dir);
+         g_ne.Update(v72Dir, g_mce, g_rie, g_engine1A, g_energy);
+         g_frz.Update(g_curve, g_energy, g_part, v72Dir, v72ATR);
+         g_ie2.Update(g_curve, v72Dir, v72ATR);
+         g_te.Update(g_energy, g_frz, g_ie2, g_mce, g_rie, g_engine1A, v72Dir, v72ATR);
+         g_tqe.Update(v72Phc, g_erf, g_frz, g_mce, g_rie, g_liquidity, g_energy);
+         g_doe.Update(v72Dir, g_mce, g_rie, g_tqe, g_erf, g_te, g_ie2, g_ne,
+                       g_engine1A, g_frz, v72ATR);
+      }
+
+
       //--- Phase 6: meta layer overlays Self-Observation, Probability,
       //    Regime ON TOP of Story's trinity. Confidence gets blended
       //    with SelfTrust; supporting.regime + probability cloud now live.
@@ -10376,6 +11564,39 @@ void OnTick()
                dr.decision = OMEGA_DEC_OBSERVE;
                dr.reason   = REASON_HARD_LIMIT;
                dr.detail   = "portfolio cap reached";
+              }
+            //--- Phase V72 — DOE as canonical authority (opt-in). When enabled,
+            //    DOE owns the machine recommendation: it may only CONTRADICT
+            //    (block a long when DOE is firmly Short, or vice-versa) or
+            //    fully stand the engine down on "No Trade" (invalidation). It
+            //    is NOT used to gag the organism on a bare "Wait" — per the
+            //    canonical rule, only catastrophic states veto. DOE's firm
+            //    Long/Short directional disagreement and explicit "No Trade"
+            //    (price through invalidation) are treated as such.
+            else if(InpV72UseDOEAsAuthority)
+              {
+               int wantDir = (dr.decision == OMEGA_DEC_ENTER_LONG) ? 1
+                            : (dr.decision == OMEGA_DEC_ENTER_SHORT) ? -1
+                            : (dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir);
+               bool doeContradicts = (g_doe.doe_action == "Long"  && wantDir == -1) ||
+                                     (g_doe.doe_action == "Short" && wantDir == 1);
+               bool doeNoTrade     = (g_doe.doe_action == "No Trade");   // invalidation level breached
+               if(doeNoTrade || doeContradicts)
+                 {
+                  g_entryStatus = StringFormat("SKIP: DOE AUTHORITY — action=%s conf=%.0f want=%s · %s",
+                                                g_doe.doe_action, g_doe.doe_confidence,
+                                                wantDir == 1 ? "LONG" : wantDir == -1 ? "SHORT" : "—",
+                                                doeNoTrade ? "invalidation breached" : "DOE direction conflict");
+                  g_entryStatusTime = TimeCurrent();
+                  g_entryAttempts++; g_entrySkips++;
+                  OmegaLogger::LogWarning("V72",
+                     StringFormat("Entry vetoed by DOE · action=%s · want=%d · %s",
+                                   g_doe.doe_action, wantDir,
+                                   doeNoTrade ? "No Trade (invalidated)" : "direction conflict"));
+                  dr.decision = OMEGA_DEC_OBSERVE;
+                  dr.reason   = REASON_HARD_LIMIT;
+                  dr.detail   = "DOE: " + g_doe.doe_action;
+                 }
               }
            }
 
@@ -10529,6 +11750,27 @@ void OnTimer()
          OmegaLogger::LogInfo("V60·SENZO·3", g_senzo.line3);
          OmegaLogger::LogInfo("V60·SENZO·4", g_senzo.line4);
          OmegaLogger::LogInfo("V60·SENZO·5", g_senzo.line5);
+        }
+
+      //--- Phase V72: the decision layer. DOE is the canonical machine
+      //    recommendation; the supporting engines (TQE grade, ERF gate,
+      //    NE narrative, MCE consensus, RIE rotation, FRZ/TE/IE2) are dumped
+      //    so the trader can trace exactly why DOE landed where it did.
+      OmegaLogger::LogInfo("V72·DOE",
+         StringFormat("%s · authority=%s", g_doe.Snapshot(),
+                       InpV72UseDOEAsAuthority ? "ON" : "off (organism routes)"));
+      OmegaLogger::LogInfo("V72·QUAL",
+         StringFormat("tqe[%s] · erf[%s] · ne[%s]",
+                       g_tqe.Snapshot(), g_erf.Snapshot(), g_ne.Snapshot()));
+      if(InpDashAdvancedMode)
+        {
+         OmegaLogger::LogInfo("V72·INTEL",
+            StringFormat("mce[%s] · rie[%s]", g_mce.Snapshot(), g_rie.Snapshot()));
+         OmegaLogger::LogInfo("V72·TARGETS",
+            StringFormat("frz[%s] · te[%s] · ie2[%s]",
+                          g_frz.Snapshot(), g_te.Snapshot(), g_ie2.Snapshot()));
+         OmegaLogger::LogInfo("V72·REGISTRY",
+            StringFormat("wr[%s] · dwr[%s]", g_wr.Snapshot(), g_dwr.Snapshot()));
         }
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
