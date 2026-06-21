@@ -2,7 +2,7 @@
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|       *** SINGLE-FILE BUNDLE — Phases 1..8 ***                   |
+//|       *** SINGLE-FILE BUNDLE — Phases 1..8.5 ***                 |
 //|                                                                  |
 //|   This file contains every module of the F72 OMEGA engine        |
 //|   inlined in dependency order. Modular tree under MT5/F72_Omega/.|
@@ -12,8 +12,8 @@
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Phases 1..8 · skeleton + perception + tree + narrative + positions + meta + backtest + participants."
-#property description "Trinity LIVE. Engine trades. Fitness-aware."
+#property description "Phases 1..8 + tunable decision thresholds."
+#property description "Trinity LIVE. Engine trades."
 
 #include <Trade/Trade.mqh>
 
@@ -6493,9 +6493,22 @@ input double              InpEffThresh        = 0.65;                 // Efficie
 input double              InpDispThresh       = 1.5;                  // Displacement threshold (ATR)
 input double              InpConvMult         = 0.01;                 // Convexity multiplier (ATR)
 input int                 InpPivotLen         = 5;                    // Pivot length
-input int                 InpStructLen        = 10;                   // Structure pivot length
+input int                 InpStructLen        = 10;                   // Structure pivot length (warmup bars)
 input double              InpImpulseMult      = 1.5;                  // Impulse ATR multiple
 input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
+
+input group "═══ Decision thresholds (Phase 5 — tunable) ═══"
+input double              InpEnterMinLife     = 45.0;                 // Min life to ENTER (HOLDING regime)
+input double              InpEnterMinStab     = 45.0;                 // Min stability to ENTER
+input double              InpEnterMinConf     = 40.0;                 // Min confidence to ENTER
+input double              InpAttackMinLife    = 60.0;                 // Min life for ALIVE (strong) entries
+input double              InpAttackMinStab    = 60.0;                 // Min stability for ALIVE entries
+input double              InpAttackMinConf    = 55.0;                 // Min confidence for ALIVE entries
+input double              InpReverseMinConf   = 50.0;                 // Min confidence to FLIP on dead
+input int                 InpEnterMinAlign    = 4;                    // Min aligned TFs (out of 6) to enter
+input int                 InpMaxBudget        = 4;                    // Max positions per campaign
+input double              InpDefaultSlAtrMult = 1.5;                  // Fallback SL = N × ATR
+input double              InpReduceLifeFloor  = 38.0;                 // Below this: REDUCE if profitable
 
 input group "═══ Meta (Phase 6) ═══"
 input double              InpSelfTrustBlend   = 0.30;                 // Self-trust blend into Confidence (0..1)
@@ -6554,6 +6567,24 @@ int OnInit()
    g_positions.Init(_Symbol, InpMagic, g_exec.TradeShell(),
                      GetPointer(g_capital), GetPointer(g_risk), GetPointer(g_db));
    g_exec.SetPositions(GetPointer(g_positions));
+
+   //--- Phase 5: write tunable decision thresholds from inputs into g_dparams.
+   g_dparams.enterMinLife      = InpEnterMinLife;
+   g_dparams.enterMinStability = InpEnterMinStab;
+   g_dparams.enterMinConf      = InpEnterMinConf;
+   g_dparams.attackMinLife     = InpAttackMinLife;
+   g_dparams.attackMinStab     = InpAttackMinStab;
+   g_dparams.attackMinConf     = InpAttackMinConf;
+   g_dparams.reverseMinConf    = InpReverseMinConf;
+   g_dparams.enterMinAlign     = InpEnterMinAlign;
+   g_dparams.maxBudget         = InpMaxBudget;
+   g_dparams.defaultSlAtrMult  = InpDefaultSlAtrMult;
+   g_dparams.reduceLifeFloor   = InpReduceLifeFloor;
+   OmegaLogger::LogInfo("EA",
+      StringFormat("Decision thresholds: enterLife=%.0f stab=%.0f conf=%.0f · attackLife=%.0f stab=%.0f conf=%.0f · align=%d/6 · budget=%d · slAtr=%.1f",
+                    InpEnterMinLife, InpEnterMinStab, InpEnterMinConf,
+                    InpAttackMinLife, InpAttackMinStab, InpAttackMinConf,
+                    InpEnterMinAlign, InpMaxBudget, InpDefaultSlAtrMult));
 
 //--- 7. Perception (Phase 2): multi-TF curve engine.
    if(!g_curve.Init(_Symbol, (ENUM_TIMEFRAMES)_Period,
