@@ -1990,116 +1990,7 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 1, 23, _armed, text_color = #060a12, text_size = size.normal, bgcolor = color.new(_armCol, 25))
     table.cell(copilot, 0, 24, "◣ " + str.replace_all(matters, "\n", " ") + " ◢", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
 
-f_drawMatrix(int master, string action, float conflict, float threat) =>
-    var table matrix = na
-    if na(matrix)
-        matrix := table.new(position.bottom_center, 4, 15, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
-    string _f1   = f_famS(int(nz(se1_ph)))
-    string _f3   = f_famS(int(nz(se3_ph)))
-    string _f5   = f_famS(int(nz(se5_ph)))
-    string _f15  = f_famS(int(nz(se15_ph)))
-    string _f60  = f_famS(int(nz(se60_ph)))
-    string _f240 = f_famS(int(nz(se240_ph)))
-    float _pCont = convexityBelief
-    float _pRev  = retracementBelief
-    float _pExp  = expansionBelief
-    float _pNew  = creationBelief
-    float _pAbs  = absorptionBelief
-    float _pStand = math.max(threat, conflict)
-    float _bMax = math.max(_pExp, math.max(_pRev, math.max(_pNew, math.max(_pAbs, _pCont))))
-    string _outcome = _bMax <= 0 ? "Forming —" : _bMax == _pRev ? "Likely: Structural Reversal" : _bMax == _pAbs ? "Likely: Absorption / Stall" : _bMax == _pNew ? "Likely: New High / Low" : _bMax == _pExp ? "Likely: Expansion" : "Likely: Continuation"
-    string _fcGrade = fractalStackScore >= 85 ? "Exceptional" : fractalStackScore >= 66 ? "Strong" : fractalStackScore >= 50 ? "Moderate" : "Weak"
-    bool   _htfAbs = str.contains(f_phaseStr(int(nz(se60_ph))), "Absorption") or str.contains(f_phaseStr(int(nz(se240_ph))), "Absorption")
-    int    _htfDir = l2_dir + l4_dir
-    string _htfTrend = _htfAbs ? "Weakening" : _htfDir >= 1 ? "Strengthening Up" : _htfDir <= -1 ? "Strengthening Down" : "Mixed"
-    bool   _ltfRev = m1_dir != 0 and m1_dir != (l4_dir != 0 ? l4_dir : l2_dir)
-    string _ltfRevTx = _ltfRev ? "Forming" : "—"
-    string _fusionInterp = (_htfAbs ? "HTF Weakening" : "HTF " + _htfTrend) + " — LTF " + (_ltfRev ? "Reversal Confirming" : "Aligned")
-    float  _fusionConf = math.max(0.0, math.min(100.0, fractalStackScore * 0.6 + (100.0 - conflict) * 0.4))
-    string _execDir = master == 0 ? "STAND DOWN — NO ALIGNMENT" : conflict > 55 ? "STAND DOWN — CONFLICT" : action == "ATTACK" ? "ATTACK — ALIGNED" : action == "PREPARE" ? "PREPARE — BUILDING" : "WAIT — NO TRIGGER"
-    color _c1 = m1_dir == 1 ? #34d399 : m1_dir == -1 ? #fb7185 : #94a3b8
-    color _c3 = l3_dir == 1 ? #34d399 : l3_dir == -1 ? #fb7185 : #94a3b8
-    color _c5 = l0_dir == 1 ? #34d399 : l0_dir == -1 ? #fb7185 : #94a3b8
-    color _c15 = l1_dir == 1 ? #34d399 : l1_dir == -1 ? #fb7185 : #94a3b8
-    color _c60 = l2_dir == 1 ? #34d399 : l2_dir == -1 ? #fb7185 : #94a3b8
-    color _c240 = l4_dir == 1 ? #34d399 : l4_dir == -1 ? #fb7185 : #94a3b8
-    table.cell(matrix, 0, 0, "WAVE NARRATIVE", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 2, 0, "EXECUTION PROBABILITY", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 3, 0, _liveDot, text_color = _pulse ? #22d3ee : #475569, text_size = size.small, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 0, 1, _wl1, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 1, f_wv(m1_dir, _f1), text_color = _c1, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 1, "Exec Directive", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 1, _execDir, text_color = str.startswith(_execDir, "ATTACK") ? #34d399 : str.startswith(_execDir, "STAND") ? #fb7185 : #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 2, _wl2, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 2, f_wv(l3_dir, _f3), text_color = _c3, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 2, "Continuation", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 2, str.tostring(math.round(_pCont)) + "%", text_color = #38bdf8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 3, _wl3, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 3, f_wv(l0_dir, _f5), text_color = _c5, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 3, "Reversal", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 3, str.tostring(math.round(_pRev)) + "%", text_color = #fb7185, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 4, _wl4, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 4, f_wv(l1_dir, _f15), text_color = _c15, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 4, "Expansion", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 4, str.tostring(math.round(_pExp)) + "%", text_color = #34d399, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 5, _wl5, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 5, f_wv(l2_dir, _f60), text_color = _c60, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 5, "New High / Low", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 5, str.tostring(math.round(_pNew)) + "%", text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 6, _wl6, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 6, f_wv(l4_dir, _f240), text_color = _c240, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 6, "Absorption", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 6, str.tostring(math.round(_pAbs)) + "%", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 7, "Outcome", text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 7, _outcome, text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 7, "Stand Down", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 7, str.tostring(math.round(_pStand)) + "%", text_color = _pStand >= 55 ? #fb7185 : #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 8, "Fractal Conf", text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 8, str.tostring(math.round(fractalStackScore)) + "%  " + _fcGrade, text_color = fractalStackScore >= 66 ? #34d399 : #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 8, "MULTI-LEVEL PROGRESS", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 0, 9, "MTF FUSION", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#1f2937, 10))
-    table.cell(matrix, 2, 9, _wl1, text_color = _c1, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 9, f_gauge(nz(se1_wp)) + " " + str.tostring(math.round(nz(se1_wp))) + "%", text_color = _c1, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 10, "Fusion Interp", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 10, _fusionInterp, text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 10, _wl2, text_color = _c3, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 10, f_gauge(nz(se3_wp)) + " " + str.tostring(math.round(nz(se3_wp))) + "%", text_color = _c3, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 11, "Fusion Conf", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 11, str.tostring(math.round(_fusionConf)) + "%", text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 11, _wl3, text_color = _c5, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 11, f_gauge(nz(se5_wp)) + " " + str.tostring(math.round(nz(se5_wp))) + "%", text_color = _c5, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 12, "HTF Trend", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 12, _htfTrend, text_color = str.startswith(_htfTrend, "Weak") ? #fb7185 : #34d399, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 12, _wl4, text_color = _c15, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 12, f_gauge(nz(se15_wp)) + " " + str.tostring(math.round(nz(se15_wp))) + "%", text_color = _c15, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 0, 13, "LTF Reversal", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 1, 13, _ltfRevTx, text_color = _ltfRev ? #fbbf24 : #475569, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 13, _wl5, text_color = _c60, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 13, f_gauge(nz(se60_wp)) + " " + str.tostring(math.round(nz(se60_wp))) + "%", text_color = _c60, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 2, 14, _wl6, text_color = _c240, text_size = size.small, text_halign = text.align_left)
-    table.cell(matrix, 3, 14, f_gauge(nz(se240_wp)) + " " + str.tostring(math.round(nz(se240_wp))) + "%", text_color = _c240, text_size = size.small, text_halign = text.align_left)
 
-f_drawTf() =>
-    var table tfPanel = na
-    if na(tfPanel)
-        tfPanel := table.new(position.bottom_left, 2, 9, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
-    table.cell(tfPanel, 0, 0, "──── CONTROL ────", text_color = #cfe9ff, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 0, _liveDot, text_color = _pulse ? #22d3ee : #475569, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 0, 1, _wl1, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 1, m1_dir == 1 ? "▲ Bulls" : m1_dir == -1 ? "▼ Bears" : "— Flat", text_color = m1_dir == 1 ? #4ade80 : m1_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 2, _wl2, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 2, l3_dir == 1 ? "▲ Bulls" : l3_dir == -1 ? "▼ Bears" : "— Flat", text_color = l3_dir == 1 ? #4ade80 : l3_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 3, _wl3, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 3, l0_dir == 1 ? "▲ Bulls" : l0_dir == -1 ? "▼ Bears" : "— Flat", text_color = l0_dir == 1 ? #4ade80 : l0_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 4, _wl4, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 4, l1_dir == 1 ? "▲ Bulls" : l1_dir == -1 ? "▼ Bears" : "— Flat", text_color = l1_dir == 1 ? #4ade80 : l1_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 5, _wl5, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 5, l2_dir == 1 ? "▲ Bulls" : l2_dir == -1 ? "▼ Bears" : "— Flat", text_color = l2_dir == 1 ? #4ade80 : l2_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 6, _wl6, text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_center)
-    table.cell(tfPanel, 1, 6, l4_dir == 1 ? "▲ Bulls" : l4_dir == -1 ? "▼ Bears" : "— Flat", text_color = l4_dir == 1 ? #4ade80 : l4_dir == -1 ? #f87171 : #94a3b8, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 7, "Authority", text_color = #cbd5e1, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 1, 7, f_gauge(fractalStackScore), text_color = fractalStackDir == 1 ? #4ade80 : fractalStackDir == -1 ? #f87171 : #fbbf24, text_size = size.normal, text_halign = text.align_left)
-    table.cell(tfPanel, 0, 8, (fractalStackScore >= 66 ? "DOMINANT" : "CONTESTED") + " · " + (fractalStackDir == 1 ? "TRANSFER UPWARD" : fractalStackDir == -1 ? "TRANSFER DOWNWARD" : "BALANCED"), text_color = #cfe9ff, text_size = size.small, text_halign = text.align_left)
 
 if barstate.islast
     array.clear(gOccY)
@@ -2303,20 +2194,6 @@ if barstate.islast
     // ══════════════════════════════════════════════════════════════════════════
     if showCopilot
         f_drawCopilot(master, action, oppScore, alignment, conflict, threat, residual, resCode, attractor, pdir, _eligN, _fezHi, _fezLo, _attrIdx, matters, _fwd)
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // WAVE MATRIX PANEL (bottom-center) — narrative · execution probability ·
-    // MTF fusion · multi-level progress. All values READ from the engines.
-    // ══════════════════════════════════════════════════════════════════════════
-    if showMatrix
-        f_drawMatrix(master, action, conflict, threat)
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // WAVE & TIMEFRAMES PANEL (bottom-left) — narrative + per-TF wave stack
-    // ══════════════════════════════════════════════════════════════════════════
-    if showTF
-        f_drawTf()
-
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CAMPAIGN OWNERSHIP + PARTICIPANT ENGINE (own islast block, size-limit safe)
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2405,30 +2282,6 @@ if barstate.islast
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CURVE OBJECT readout (own islast block) — the energy state of the curve
 // ══════════════════════════════════════════════════════════════════════════════
-if barstate.islast and showCurve
-    var table curveT = na
-    if na(curveT)
-        curveT := table.new(position.middle_right, 2, 9, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
-    string _cvDirTx = gCurve.dir == 1 ? "▲ BULL" : gCurve.dir == -1 ? "▼ BEAR" : "○ —"
-    string _cvSt    = gCurve.maturity < 25 ? "CHARGING" : gCurve.eRes > 55 ? "EXPANDING" : gCurve.maturity > 80 ? "TERMINAL" : gCurve.eDiss > 50 ? "DISSIPATING" : "TRANSFERRING"
-    color  _cvStCol = _cvSt == "EXPANDING" ? #34d399 : _cvSt == "CHARGING" ? #38bdf8 : _cvSt == "TERMINAL" ? #fb7185 : #fbbf24
-    table.cell(curveT, 0, 0, "◤ CURVE ▌ ENERGY " + _liveDot, text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(curveT, 1, 0, _cvDirTx + "  " + _cvSt, text_color = #06121f, text_size = size.normal, bgcolor = color.new(_cvStCol, 25))
-    table.cell(curveT, 0, 1, "Energy in", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 1, f_gauge(gCurve.eIn) + " " + str.tostring(math.round(gCurve.eIn)) + "%", text_color = #34d399, text_size = size.small)
-    table.cell(curveT, 0, 2, "Dissipated", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 2, f_gauge(gCurve.eDiss) + " " + str.tostring(math.round(gCurve.eDiss)) + "%", text_color = #fbbf24, text_size = size.small)
-    table.cell(curveT, 0, 3, "Residual", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 3, f_gauge(gCurve.eRes) + " " + str.tostring(math.round(gCurve.eRes)) + "%", text_color = gCurve.eRes > 50 ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(curveT, 0, 4, "Displacement", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 4, str.tostring(math.round(gCurve.dispATR * 10) / 10) + " ATR", text_color = #e2e8f0, text_size = size.small)
-    table.cell(curveT, 0, 5, "Convexity", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 5, f_gauge(gCurve.convex) + " " + str.tostring(math.round(gCurve.convex)) + "%", text_color = #a78bfa, text_size = size.small)
-    table.cell(curveT, 0, 6, "Compression", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 6, f_gauge(gCurve.compress) + " " + str.tostring(math.round(gCurve.compress)) + "%", text_color = gCurve.compress >= 50 ? #fbbf24 : #34d399, text_size = size.small)
-    table.cell(curveT, 0, 7, "Maturity", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(curveT, 1, 7, f_gauge(gCurve.maturity) + " " + str.tostring(math.round(gCurve.maturity)) + "%", text_color = #e2e8f0, text_size = size.small)
-    table.cell(curveT, 0, 8, "energy can't travel straight → it curves", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CURVE STACK (own islast block) — the nested curve family, parent (top) to
