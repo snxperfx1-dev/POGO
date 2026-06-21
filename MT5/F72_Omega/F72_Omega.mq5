@@ -1,12 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
-//|       *** AUTONOMOUS-ONLY · TRADES IMMEDIATELY ***               |
+//|       *** AUTONOMOUS · PRODUCTION THRESHOLDS ***                 |
 //+------------------------------------------------------------------+
 #property copyright "F72 OMEGA"
 #property version   "1.00"
 #property strict
-#property description "F72 OMEGA — AUTONOMOUS only. Force-fallback entry."
+#property description "F72 OMEGA — multi-timeframe curve organism."
+#property description "AUTONOMOUS only. Production thresholds. Force-fallback for warmup only."
 #include <Trade/Trade.mqh>
 
 
@@ -6481,26 +6482,26 @@ input int                 InpHeartbeatSec     = 5;                    // Heartbe
 input group "═══ Curve physics (Phase 2) ═══"
 input int                 InpAtrLen           = 14;                   // ATR length
 input int                 InpEffLen           = 10;                   // Efficiency lookback
-input double              InpEffThresh        = 0.55;                 // Efficiency threshold (lower = easier)
-input double              InpDispThresh       = 1.2;                  // Displacement threshold (ATR)
+input double              InpEffThresh        = 0.65;                 // Efficiency threshold
+input double              InpDispThresh       = 1.5;                  // Displacement threshold (ATR)
 input double              InpConvMult         = 0.01;                 // Convexity multiplier (ATR)
-input int                 InpPivotLen         = 3;                    // Pivot length (lower = faster pivots)
-input int                 InpStructLen        = 3;                    // Structure pivot length (warmup bars)
-input double              InpImpulseMult      = 1.0;                  // Impulse ATR multiple (lower = more spawns)
-input double              InpChochBufATR      = 0.50;                 // CHoCH buffer (ATR)
+input int                 InpPivotLen         = 5;                    // Pivot length
+input int                 InpStructLen        = 10;                   // Structure pivot length (warmup bars)
+input double              InpImpulseMult      = 1.5;                  // Impulse ATR multiple
+input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
 
-input group "═══ Decision thresholds (Phase 5 — tunable) ═══"
-input double              InpEnterMinLife     = 30.0;                 // Min life to ENTER (HOLDING regime)
-input double              InpEnterMinStab     = 30.0;                 // Min stability to ENTER
-input double              InpEnterMinConf     = 25.0;                 // Min confidence to ENTER
-input double              InpAttackMinLife    = 45.0;                 // Min life for ALIVE (strong) entries
-input double              InpAttackMinStab    = 45.0;                 // Min stability for ALIVE entries
-input double              InpAttackMinConf    = 35.0;                 // Min confidence for ALIVE entries
-input double              InpReverseMinConf   = 35.0;                 // Min confidence to FLIP on dead
-input int                 InpEnterMinAlign    = 2;                    // Min aligned TFs (out of 6) to enter
+input group "═══ Decision thresholds (Phase 5 — production) ═══"
+input double              InpEnterMinLife     = 45.0;                 // Min life to ENTER (HOLDING regime)
+input double              InpEnterMinStab     = 45.0;                 // Min stability to ENTER
+input double              InpEnterMinConf     = 40.0;                 // Min confidence to ENTER
+input double              InpAttackMinLife    = 60.0;                 // Min life for ALIVE (strong) entries
+input double              InpAttackMinStab    = 60.0;                 // Min stability for ALIVE entries
+input double              InpAttackMinConf    = 55.0;                 // Min confidence for ALIVE entries
+input double              InpReverseMinConf   = 50.0;                 // Min confidence to FLIP on dead
+input int                 InpEnterMinAlign    = 4;                    // Min aligned TFs (out of 6) to enter
 input int                 InpMaxBudget        = 4;                    // Max positions per campaign
 input double              InpDefaultSlAtrMult = 1.5;                  // Fallback SL = N × ATR
-input double              InpReduceLifeFloor  = 28.0;                 // Below this: REDUCE if profitable
+input double              InpReduceLifeFloor  = 38.0;                 // Below this: REDUCE if profitable
 
 input group "═══ Meta (Phase 6) ═══"
 input double              InpSelfTrustBlend   = 0.30;                 // Self-trust blend into Confidence (0..1)
