@@ -30,7 +30,7 @@ private:
 public:
                      OmegaPaperTrade()
      {
-      m_mode        = OMEGA_MODE_OBSERVER;
+      m_mode        = OMEGA_MODE_AUTONOMOUS;
       m_paperTicket = 1000000;
      }
 

@@ -6,8 +6,7 @@
 #property copyright "F72 OMEGA"
 #property version   "1.00"
 #property strict
-#property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "AUTONOMOUS only. Force-fallback entry until perception primes."
+#property description "F72 OMEGA — AUTONOMOUS only. Force-fallback entry."
 #include <Trade/Trade.mqh>
 
 
@@ -1295,7 +1294,7 @@ private:
 public:
                      OmegaPaperTrade()
      {
-      m_mode        = OMEGA_MODE_OBSERVER;
+      m_mode        = OMEGA_MODE_AUTONOMOUS;
       m_paperTicket = 1000000;
      }
 
