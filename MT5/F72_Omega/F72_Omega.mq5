@@ -2,7 +2,7 @@
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|       *** SINGLE-FILE BUNDLE — Phase 1 + Phase 2 ***             |
+//|       *** SINGLE-FILE BUNDLE — Phase 1 + Phase 2 + Phase 3 ***   |
 //|                                                                  |
 //|   This file contains every module of the F72 OMEGA engine        |
 //|   inlined in dependency order. To reproduce the modular layout,  |
@@ -14,7 +14,7 @@
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Phase 1 + 2 bundled: skeleton + perception."
+#property description "Phases 1+2+3 bundled: skeleton + perception + curve tree."
 #property description "Trinity: LifeScore · StoryStability · StoryConfidence."
 
 #include <Trade/Trade.mqh>
@@ -2246,6 +2246,861 @@ public:
 #endif // __OMEGA_FORCE_MQH__
 
 //==================================================================
+//= MODULE: Tree/CurveNode
+//= Source: Include/Tree/CurveNode.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    CurveNode.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 4–8 — the atomic curve in the recursive tree.            |
+//|                                                                  |
+//|   A CurveNode is born from an EVENT, not from a timeframe:       |
+//|   either the chart-TF wave engine spawns a fresh root (dir       |
+//|   established, no living owner) OR a Phase-2 CHoCH against the   |
+//|   current owner spawns a CHILD curve (same lifecycle, opposite   |
+//|   orientation).                                                  |
+//|                                                                  |
+//|   Each node has:                                                 |
+//|     id          — monotonic integer (set by CurveTree)           |
+//|     parentId    — -1 for root, else id of parent                 |
+//|     dir         — +1 long / -1 short                             |
+//|     origin      — price where the curve was born                 |
+//|     extreme     — best price the curve has reached so far        |
+//|     energy      — 0..100, rises on progress, decays on stall     |
+//|     alive       — false when energy <= 2 OR ownership released   |
+//|     depth       — 0 = root, 1 = first child, etc.                |
+//|     state       — emergent phase string (Principle 1 / 14)       |
+//|     bar         — bar index at birth                             |
+//|     comp        — compression at birth                           |
+//|     mat         — maturity (waveProgress %) at birth             |
+//|     srcTf       — 0=chart, 5=H1, 6=H4 (where the curve lives)    |
+//|     forceAtBirth, forcePeak, forceAtDeath                        |
+//|     birthTime, deathTime                                         |
+//|     deathCause  — taxonomy (transfer / merge / decay / terminal) |
+//|                                                                  |
+//|   The state string is computed by f_nodeState() (below) — phases |
+//|   EMERGE from the curve, not the legacy machine. Recursion       |
+//|   depth > 0 means the node lives in the Transition family.       |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CURVE_NODE_MQH__
+#define __OMEGA_CURVE_NODE_MQH__
+
+
+//=== Node death taxonomy (mirrors campaign death cause) ============
+enum ENUM_NODE_DEATH
+  {
+   NODE_ALIVE                   = 0,
+   NODE_DEATH_DECAY             = 1,
+   NODE_DEATH_TRANSFERRED       = 2,
+   NODE_DEATH_MERGED            = 3,
+   NODE_DEATH_TERMINAL_INDUCTION= 4,
+   NODE_DEATH_REGIME_SHIFT      = 5
+  };
+
+//=== The node ======================================================
+struct CurveNode
+  {
+   long             id;
+   long             parentId;
+   int              dir;
+   double           origin;
+   double           extreme;
+   double           energy;
+   bool             alive;
+   int              depth;
+   string           state;
+   int              bar;
+   double           comp;
+   double           mat;
+   int              srcTf;
+   double           forceAtBirth;
+   double           forcePeak;
+   double           forceAtDeath;
+   datetime         birthTime;
+   datetime         deathTime;
+   ENUM_NODE_DEATH  deathCause;
+   long             campaignId;     // optional FK into CampaignDB
+
+                     CurveNode() { Reset(); }
+
+   void Reset()
+     {
+      id = 0; parentId = -1; dir = 0;
+      origin = 0; extreme = 0; energy = 0;
+      alive = false; depth = 0; state = "";
+      bar = 0; comp = 0; mat = 0; srcTf = 0;
+      forceAtBirth = forcePeak = forceAtDeath = 0;
+      birthTime = 0; deathTime = 0;
+      deathCause = NODE_ALIVE;
+      campaignId = 0;
+     }
+
+   //--- Phase the curve OWNS — emergent from energy / depth / comp / mat
+   string EmergentState() const
+     {
+      if(depth > 0)
+        {
+         if(energy >= 70.0) return "Transition · recursive expansion";
+         if(energy >= 40.0) return "Transition · recursive induction";
+         return "Transition · recursive liquidation";
+        }
+      if(mat < 12.0) return "Point 4 Origin";
+      if(energy >= 78.0 && mat >= 70.0)
+         return (dir == 1 ? "New High" : (dir == -1 ? "New Low" : "Climax"));
+      if(mat < 35.0)        return "Expansion";
+      if(mat < 55.0)        return "Expansion Pre-Convexity";
+      if(energy >= 55.0)    return "Expansion Induction";
+      if(energy >= 35.0)    return "Expansion Liquidity";
+      if(comp >= 60.0)      return "Retracement Pre-Convexity";
+      if(energy >= 18.0)    return "Retracement Induction";
+      return "Retracement";
+     }
+
+   //--- progress test on the latest bar — feeds energy update
+   bool Progressed(double barHigh, double barLow) const
+     {
+      if(!alive) return false;
+      if(dir == 1)  return barHigh > extreme;
+      if(dir == -1) return barLow  < extreme;
+      return false;
+     }
+
+   //--- short snapshot for logs
+   string Snapshot() const
+     {
+      return StringFormat("id=%I64d p=%I64d dir=%d depth=%d e=%.0f mat=%.0f comp=%.0f %s alive=%s",
+                          id, parentId, dir, depth, energy, mat, comp, state, alive?"Y":"N");
+     }
+  };
+
+#endif // __OMEGA_CURVE_NODE_MQH__
+
+//==================================================================
+//= MODULE: Tree/Ownership
+//= Source: Include/Tree/Ownership.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    Ownership.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 6 — Principle 8 ownership:                               |
+//|   Ownership belongs to the SHALLOWEST curve that still holds     |
+//|   energy. A child only takes over once the parent dissipates     |
+//|   below the floor.                                               |
+//|                                                                  |
+//|   Inputs: array of CurveNode (whole tree)                        |
+//|   Outputs: index of dominant owner, depth, direction, energy,    |
+//|            and an "ownership stability" metric (0..100) used by  |
+//|            the trinity supporting field.                         |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_OWNERSHIP_MQH__
+#define __OMEGA_OWNERSHIP_MQH__
+
+
+//=== Result struct =================================================
+struct OwnershipResult
+  {
+   int       index;          // -1 if none
+   int       depth;
+   int       direction;
+   double    energy;
+   double    stability;      // 0..100
+
+                     OwnershipResult()
+     {
+      index = -1; depth = 999; direction = 0;
+      energy = 0; stability = OMEGA_TRINITY_NEUTRAL;
+     }
+  };
+
+class Ownership
+  {
+public:
+   //--- Pick the dominant owner. Threshold floor = ownMinE.
+   //    Tie-breaker: deepest among shallow ties (shouldn't happen
+   //    since we walk by depth ascending). Fallback: highest energy
+   //    alive node if none crosses the floor.
+   static OwnershipResult Pick(CurveNode &tree[], int count, double ownMinE = 12.0)
+     {
+      OwnershipResult r;
+
+      //-- preferred: shallowest with energy >= floor; ties -> highest energy
+      for(int i = 0; i < count; i++)
+        {
+         if(!tree[i].alive)               continue;
+         if(tree[i].energy < ownMinE)     continue;
+         if(tree[i].depth < r.depth ||
+            (tree[i].depth == r.depth && tree[i].energy > r.energy))
+           {
+            r.index     = i;
+            r.depth     = tree[i].depth;
+            r.energy    = tree[i].energy;
+            r.direction = tree[i].dir;
+           }
+        }
+
+      //-- fallback: any alive, highest energy
+      if(r.index < 0)
+        {
+         double best = -1.0;
+         for(int i = 0; i < count; i++)
+           {
+            if(!tree[i].alive) continue;
+            if(tree[i].energy > best)
+              {
+               best = tree[i].energy;
+               r.index     = i;
+               r.depth     = tree[i].depth;
+               r.energy    = tree[i].energy;
+               r.direction = tree[i].dir;
+              }
+           }
+        }
+
+      //-- stability: how far the dominant owner is above the floor,
+      //   blended with the energy gap to second-best alive node.
+      if(r.index >= 0)
+        {
+         double secondBest = 0.0;
+         for(int i = 0; i < count; i++)
+           {
+            if(i == r.index || !tree[i].alive) continue;
+            if(tree[i].energy > secondBest) secondBest = tree[i].energy;
+           }
+         double aboveFloor = OmegaMath::Clamp((r.energy - ownMinE) / (100.0 - ownMinE), 0.0, 1.0);
+         double gap        = OmegaMath::Clamp((r.energy - secondBest) / 100.0, 0.0, 1.0);
+         r.stability = OmegaMath::Clamp(aboveFloor * 60.0 + gap * 40.0, 0.0, 100.0);
+        }
+      else
+        {
+         r.stability = OMEGA_TRINITY_NEUTRAL;
+        }
+
+      return r;
+     }
+  };
+
+#endif // __OMEGA_OWNERSHIP_MQH__
+
+//==================================================================
+//= MODULE: Tree/Transfer
+//= Source: Include/Tree/Transfer.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                     Transfer.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 6/7 — ownership TRANSFER.                                |
+//|                                                                  |
+//|   "TRANSFERRED · new campaign" — a counter-direction child curve |
+//|   has BROKEN the parent's protective structure and is now the    |
+//|   dominant owner. The old campaign is dead; the trader's call is |
+//|   to flip to the counter side.                                   |
+//|                                                                  |
+//|   Detection:                                                     |
+//|     - candidate child has dir opposite to parent                 |
+//|     - close has crossed the parent's ORIGIN (the protective      |
+//|       extreme — beyond it, the parent's structure is invalidated)|
+//|     - parent's energy is leaking (≤ 35 at the moment of break)   |
+//|                                                                  |
+//|   Transfer is a one-shot event; once detected we mark parent     |
+//|   alive=false / deathCause=TRANSFERRED and bubble the campaign   |
+//|   through CampaignDB.                                            |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_TRANSFER_MQH__
+#define __OMEGA_TRANSFER_MQH__
+
+
+class Transfer
+  {
+public:
+   //--- Test whether `childIdx` represents a transfer break of `parentIdx`.
+   //    `closeNow` is the latest closed-bar close of the chart TF.
+   static bool IsTransferEvent(CurveNode &tree[], int count,
+                                int childIdx, int parentIdx, double closeNow)
+     {
+      if(childIdx < 0 || childIdx >= count) return false;
+      if(parentIdx < 0 || parentIdx >= count) return false;
+      if(!tree[childIdx].alive)  return false;
+      if(!tree[parentIdx].alive) return false;
+      if(tree[childIdx].dir == 0 || tree[parentIdx].dir == 0) return false;
+      if(tree[childIdx].dir == tree[parentIdx].dir) return false;       // child must be counter
+      if(tree[parentIdx].energy > 35.0) return false;                   // parent must be leaking
+      double parentOrigin = tree[parentIdx].origin;
+      if(parentOrigin == 0.0) return false;
+      //-- bull child against bear parent: close must rise ABOVE parent origin
+      if(tree[childIdx].dir == 1  && closeNow > parentOrigin) return true;
+      if(tree[childIdx].dir == -1 && closeNow < parentOrigin) return true;
+      return false;
+     }
+
+   //--- Apply: mark parent as transferred. Returns true if it changed.
+   static bool Apply(CurveNode &tree[], int count, int parentIdx, datetime now)
+     {
+      if(parentIdx < 0 || parentIdx >= count) return false;
+      if(!tree[parentIdx].alive) return false;
+      tree[parentIdx].alive       = false;
+      tree[parentIdx].deathTime   = now;
+      tree[parentIdx].deathCause  = NODE_DEATH_TRANSFERRED;
+      tree[parentIdx].forceAtDeath= tree[parentIdx].energy;
+      return true;
+     }
+  };
+
+#endif // __OMEGA_TRANSFER_MQH__
+
+//==================================================================
+//= MODULE: Tree/Merge
+//= Source: Include/Tree/Merge.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                        Merge.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 6/7 — child→parent MERGE.                                |
+//|                                                                  |
+//|   "MERGED → parent (B → A)" — a counter-direction child curve    |
+//|   FAILED to break the parent's structure and DIED while still    |
+//|   inside the parent's range. The parent's campaign continues —   |
+//|   the child was a recursive dissipation event, not a handoff.    |
+//|                                                                  |
+//|   Detection (called when a child node is about to die from       |
+//|   energy decay):                                                 |
+//|     - child has dir opposite to parent                           |
+//|     - child died WITHOUT breaking parent origin                  |
+//|     - parent is still alive at the moment of child death         |
+//|                                                                  |
+//|   On merge: child's deathCause = MERGED, parent.energy gets a    |
+//|   small REINFORCEMENT (+5, capped 100) — the campaign survived a |
+//|   probe and is healthier for it.                                 |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_MERGE_MQH__
+#define __OMEGA_MERGE_MQH__
+
+
+class Merge
+  {
+public:
+   //--- Test whether `childIdx` should merge back into `parentIdx`.
+   //    Called at the moment a child's energy <= 2.
+   static bool IsMergeEvent(CurveNode &tree[], int count,
+                             int childIdx, int parentIdx, double closeNow)
+     {
+      if(childIdx < 0 || childIdx >= count) return false;
+      if(parentIdx < 0 || parentIdx >= count) return false;
+      if(!tree[parentIdx].alive) return false;
+      if(tree[childIdx].dir == tree[parentIdx].dir) return false;
+      double parentOrigin = tree[parentIdx].origin;
+      if(parentOrigin == 0.0) return false;
+      //-- child died WITHOUT crossing parent origin (parent's structure intact)
+      if(tree[parentIdx].dir == 1  && closeNow > parentOrigin) return true;
+      if(tree[parentIdx].dir == -1 && closeNow < parentOrigin) return true;
+      return false;
+     }
+
+   //--- Apply the merge: child becomes MERGED, parent gets reinforcement.
+   //    Returns true if it changed state.
+   static bool Apply(CurveNode &tree[], int count,
+                      int childIdx, int parentIdx, datetime now)
+     {
+      if(childIdx < 0 || childIdx >= count) return false;
+      if(parentIdx < 0 || parentIdx >= count) return false;
+      tree[childIdx].alive        = false;
+      tree[childIdx].deathTime    = now;
+      tree[childIdx].deathCause   = NODE_DEATH_MERGED;
+      tree[childIdx].forceAtDeath = tree[childIdx].energy;
+      //-- reinforcement: campaign survived a probe
+      tree[parentIdx].energy   = OmegaMath::Clamp(tree[parentIdx].energy + 5.0, 0.0, 100.0);
+      if(tree[parentIdx].energy > tree[parentIdx].forcePeak)
+         tree[parentIdx].forcePeak = tree[parentIdx].energy;
+      return true;
+     }
+  };
+
+#endif // __OMEGA_MERGE_MQH__
+
+//==================================================================
+//= MODULE: Tree/ChainHealth
+//= Source: Include/Tree/ChainHealth.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                  ChainHealth.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 8 — Chain Vitality.                                      |
+//|                                                                  |
+//|   Three scopes of danger, distinguished:                         |
+//|     - current CURVE in trouble (life low) but the chain is fine  |
+//|     - current CHAIN weakening (life trending down across last N) |
+//|     - the WHOLE chain decaying (life bled out across the lineage)|
+//|                                                                  |
+//|   Tracks two scalars:                                            |
+//|     chainVitality   — 50 + (latestLife - firstLife) over recent  |
+//|                       lives, clamped 0..100                      |
+//|     wholeChainLife  — slow EMA of every life sample seen, 0..100 |
+//|                                                                  |
+//|   And rolls up into one of four labels for the supporting story. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CHAIN_HEALTH_MQH__
+#define __OMEGA_CHAIN_HEALTH_MQH__
+
+
+enum ENUM_CHAIN_SCOPE
+  {
+   CHAIN_HEALTHY                 = 0,
+   CHAIN_CURVE_ONLY              = 1,
+   CHAIN_WEAKENING               = 2,
+   CHAIN_WHOLE_DECAYING          = 3
+  };
+
+class ChainHealth
+  {
+private:
+   double m_lifeSeq[];
+   int    m_seqHead;
+   int    m_seqCount;
+   int    m_seqCapacity;
+   double m_wholeChainLife;
+
+public:
+                     ChainHealth()
+     {
+      m_seqCapacity = 8;
+      ArrayResize(m_lifeSeq, m_seqCapacity);
+      Reset();
+     }
+
+   void Reset()
+     {
+      m_seqHead = 0;
+      m_seqCount = 0;
+      m_wholeChainLife = OMEGA_TRINITY_NEUTRAL;
+      ArrayInitialize(m_lifeSeq, 0.0);
+     }
+
+   //--- Sample a new life value (called when a curve dies, OR each bar
+   //    on the dominant owner). The slow EMA tracks the WHOLE history.
+   void Sample(double life)
+     {
+      m_lifeSeq[m_seqHead] = life;
+      m_seqHead = (m_seqHead + 1) % m_seqCapacity;
+      if(m_seqCount < m_seqCapacity) m_seqCount++;
+      m_wholeChainLife = m_wholeChainLife + 0.02 * (life - m_wholeChainLife);
+     }
+
+   //--- 0..100 — recent life trajectory anchored at 50
+   double Vitality() const
+     {
+      if(m_seqCount < 2) return m_wholeChainLife;
+      int latestIdx  = (m_seqHead - 1 + m_seqCapacity) % m_seqCapacity;
+      int earliestIdx = (m_seqHead - m_seqCount + m_seqCapacity) % m_seqCapacity;
+      double v = OMEGA_TRINITY_NEUTRAL + (m_lifeSeq[latestIdx] - m_lifeSeq[earliestIdx]);
+      return OmegaMath::Clamp(v, 0.0, 100.0);
+     }
+
+   //--- 0..100 — slow EMA of every life ever sampled
+   double WholeChainLife() const { return m_wholeChainLife; }
+
+   //--- Composite label
+   ENUM_CHAIN_SCOPE Scope(double currentLife) const
+     {
+      if(currentLife >= 50.0)            return CHAIN_HEALTHY;
+      if(Vitality()  >= 50.0)            return CHAIN_CURVE_ONLY;
+      if(WholeChainLife() >= 45.0)       return CHAIN_WEAKENING;
+      return CHAIN_WHOLE_DECAYING;
+     }
+
+   static string ScopeString(ENUM_CHAIN_SCOPE s)
+     {
+      switch(s)
+        {
+         case CHAIN_HEALTHY:           return "HEALTHY";
+         case CHAIN_CURVE_ONLY:        return "CURVE_ONLY";
+         case CHAIN_WEAKENING:         return "CHAIN_WEAKENING";
+         case CHAIN_WHOLE_DECAYING:    return "WHOLE_DECAYING";
+        }
+      return "UNKNOWN";
+     }
+
+   //--- 0..100 score for the trinity supporting field
+   double Score(double currentLife) const
+     {
+      ENUM_CHAIN_SCOPE s = Scope(currentLife);
+      switch(s)
+        {
+         case CHAIN_HEALTHY:        return OmegaMath::Clamp(60.0 + currentLife * 0.4, 0.0, 100.0);
+         case CHAIN_CURVE_ONLY:     return OmegaMath::Clamp(50.0 + Vitality() * 0.3, 0.0, 100.0);
+         case CHAIN_WEAKENING:      return OmegaMath::Clamp(35.0 + WholeChainLife() * 0.2, 0.0, 100.0);
+         case CHAIN_WHOLE_DECAYING: return OmegaMath::Clamp(WholeChainLife() * 0.6, 0.0, 100.0);
+        }
+      return OMEGA_TRINITY_NEUTRAL;
+     }
+  };
+
+#endif // __OMEGA_CHAIN_HEALTH_MQH__
+
+//==================================================================
+//= MODULE: Tree/CurveTree
+//= Source: Include/Tree/CurveTree.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    CurveTree.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 4–8 — the recursive curve tree.                          |
+//|                                                                  |
+//|   Owns a fixed-capacity array of CurveNode. Drives the lifecycle |
+//|   on each closed bar:                                            |
+//|                                                                  |
+//|     1. spawn root if no owner exists and chart curve has direction|
+//|     2. spawn child on Phase-2 CHoCH against owner (if budget left)|
+//|     3. update each alive node's energy from progress / decay     |
+//|     4. detect TRANSFER / MERGE events                            |
+//|     5. recompute ownership                                       |
+//|     6. update ChainHealth                                        |
+//|     7. rotate dead nodes out (cap = 32)                          |
+//|                                                                  |
+//|   Outputs (consumed by Curve.mqh / supporting fields):           |
+//|     ownerIndex, ownerDir, ownerEnergy, ownerStability             |
+//|     treeDepth, recursionBudget, treeAlive                        |
+//|     chainHealth.Score(), chainHealth.Vitality()                  |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CURVE_TREE_MQH__
+#define __OMEGA_CURVE_TREE_MQH__
+
+
+#define OMEGA_TREE_CAPACITY    32
+#define OMEGA_OWN_MIN_ENERGY   12.0
+
+class OmegaCurveTree
+  {
+public:
+   CurveNode         tree[OMEGA_TREE_CAPACITY];
+   int               count;            // current number of nodes (alive + recently dead)
+   long              nextNodeId;
+   ChainHealth       chain;
+
+   //--- last-update outputs
+   int               ownerIndex;
+   int               ownerDir;
+   int               ownerDepth;
+   double            ownerEnergy;
+   double            ownerStability;
+   double            ownerLife;        // proxy = ownerEnergy until Phase 4 wires real Life
+   int               treeAlive;
+   int               treeDepth;
+   int               recursionBudget;
+
+   //--- transfer / merge counters (for explainability)
+   long              transfersCount;
+   long              mergesCount;
+   long              spawnsCount;
+   long              decaysCount;
+
+   //--- bookkeeping
+   string            symbol;
+   ENUM_TIMEFRAMES   chartTf;
+   datetime          lastBarTime;
+   long              barsProcessed;
+
+private:
+   //--- find first free slot (or -1 if full); when full we evict the
+   //    oldest dead node to make room.
+   int FindFreeSlot()
+     {
+      for(int i = 0; i < count; i++)
+         if(tree[i].id == 0) return i;
+      if(count < OMEGA_TREE_CAPACITY) return count++;
+      //-- full: evict oldest dead node by deathTime asc
+      int evict = -1;
+      datetime oldest = D'2099.01.01';
+      for(int i = 0; i < count; i++)
+        {
+         if(tree[i].alive) continue;
+         if(tree[i].deathTime > 0 && tree[i].deathTime < oldest)
+           {
+            oldest = tree[i].deathTime;
+            evict = i;
+           }
+        }
+      if(evict >= 0)
+        {
+         tree[evict].Reset();
+         return evict;
+        }
+      //-- absolutely full of alive nodes — evict lowest-energy alive
+      double minE = 1e9;
+      for(int i = 0; i < count; i++)
+         if(tree[i].alive && tree[i].energy < minE) { minE = tree[i].energy; evict = i; }
+      if(evict >= 0) { tree[evict].Reset(); return evict; }
+      return -1;
+     }
+
+   int IndexOfId(long id) const
+     {
+      if(id <= 0) return -1;
+      for(int i = 0; i < count; i++)
+         if(tree[i].id == id) return i;
+      return -1;
+     }
+
+public:
+                     OmegaCurveTree()
+     {
+      count = 0;
+      nextNodeId = 1;
+      ownerIndex = -1; ownerDir = 0; ownerDepth = 999;
+      ownerEnergy = 0; ownerStability = OMEGA_TRINITY_NEUTRAL; ownerLife = 0;
+      treeAlive = 0; treeDepth = 0; recursionBudget = 1;
+      transfersCount = mergesCount = spawnsCount = decaysCount = 0;
+      symbol = ""; chartTf = PERIOD_CURRENT;
+      lastBarTime = 0; barsProcessed = 0;
+     }
+
+   void Init(string sym, ENUM_TIMEFRAMES chart_tf)
+     {
+      symbol = sym;
+      chartTf = chart_tf;
+      OmegaLogger::LogInfo("TREE",
+         StringFormat("Init %s tf=%d capacity=%d ownFloor=%.0f",
+                      sym, (int)chart_tf, OMEGA_TREE_CAPACITY, OMEGA_OWN_MIN_ENERGY));
+     }
+
+   void Reset()
+     {
+      for(int i = 0; i < count; i++) tree[i].Reset();
+      count = 0;
+      nextNodeId = 1;
+      chain.Reset();
+      ownerIndex = -1; ownerDir = 0; ownerDepth = 999;
+      ownerEnergy = 0; ownerStability = OMEGA_TRINITY_NEUTRAL; ownerLife = 0;
+      treeAlive = 0; treeDepth = 0; recursionBudget = 1;
+      transfersCount = mergesCount = spawnsCount = decaysCount = 0;
+     }
+
+   //--- Spawn a new root from the chart curve's wave context.
+   //    Called when no living owner exists and the chart curve has dir.
+   void SpawnRoot(const CurveState &cs)
+     {
+      int slot = FindFreeSlot();
+      if(slot < 0) return;
+      tree[slot].Reset();
+      tree[slot].id          = nextNodeId++;
+      tree[slot].parentId    = -1;
+      tree[slot].dir         = cs.dir;
+      tree[slot].origin      = (cs.dir == 1) ? cs.p4l : cs.p4h;
+      tree[slot].extreme     = (cs.dir == 1) ? MathMax(cs.cycH, iHigh(symbol, chartTf, 1))
+                                              : MathMin(cs.cycL, iLow(symbol, chartTf, 1));
+      tree[slot].energy      = MathMax(40.0, MathMin(60.0 + cs.expScore * 0.4, 90.0));
+      tree[slot].alive       = true;
+      tree[slot].depth       = 0;
+      tree[slot].bar         = (int)Bars(symbol, chartTf);
+      tree[slot].comp        = cs.compIdx;
+      tree[slot].mat         = cs.waveProgress;
+      tree[slot].srcTf       = 0;
+      tree[slot].forceAtBirth= tree[slot].energy;
+      tree[slot].forcePeak   = tree[slot].energy;
+      tree[slot].birthTime   = TimeCurrent();
+      tree[slot].state       = tree[slot].EmergentState();
+      spawnsCount++;
+      OmegaLogger::LogInfo("TREE",
+         StringFormat("ROOT spawn · %s · %s", symbol, tree[slot].Snapshot()));
+     }
+
+   //--- Spawn a child counter-curve from a CHoCH against the owner.
+   //    Pre: owner exists, dir != newChildDir, recursion budget allows.
+   void SpawnChild(int parentIdx, int newDir, const CurveState &cs)
+     {
+      if(parentIdx < 0 || parentIdx >= count) return;
+      if(tree[parentIdx].depth + 1 > recursionBudget) return;
+      int slot = FindFreeSlot();
+      if(slot < 0) return;
+      double bar1Close = iClose(symbol, chartTf, 1);
+      tree[slot].Reset();
+      tree[slot].id          = nextNodeId++;
+      tree[slot].parentId    = tree[parentIdx].id;
+      tree[slot].dir         = newDir;
+      tree[slot].origin      = bar1Close;
+      tree[slot].extreme     = bar1Close;
+      tree[slot].energy      = MathMax(25.0, MathMin(50.0 + cs.expScore * 0.25, 70.0));
+      tree[slot].alive       = true;
+      tree[slot].depth       = tree[parentIdx].depth + 1;
+      tree[slot].bar         = (int)Bars(symbol, chartTf);
+      tree[slot].comp        = cs.compIdx;
+      tree[slot].mat         = 0.0;
+      tree[slot].srcTf       = 0;
+      tree[slot].forceAtBirth= tree[slot].energy;
+      tree[slot].forcePeak   = tree[slot].energy;
+      tree[slot].birthTime   = TimeCurrent();
+      tree[slot].state       = tree[slot].EmergentState();
+      spawnsCount++;
+      OmegaLogger::LogInfo("TREE",
+         StringFormat("CHILD spawn · %s · parent=%I64d · %s",
+                      symbol, tree[parentIdx].id, tree[slot].Snapshot()));
+     }
+
+   //--- Compute recursion budget (1..4) from compression tier.
+   static int BudgetFromCompression(double compNow)
+     {
+      return (int)MathMax(1, MathMin(4, 1 + (int)MathRound(compNow / 33.0)));
+     }
+
+   //--- Walk the tree once on each closed bar.
+   //    `cs` is the chart-TF CurveState (driver of spawn events).
+   bool Update(CurveState &cs)
+     {
+      if(!cs.physics.ready) return false;
+      datetime curBarT = cs.lastBarTime;
+      if(curBarT == 0) return false;
+      if(curBarT == lastBarTime) return false;
+      lastBarTime = curBarT;
+      barsProcessed++;
+
+      double bar1Close = iClose(symbol, chartTf, 1);
+      double bar1High  = iHigh(symbol, chartTf, 1);
+      double bar1Low   = iLow(symbol, chartTf, 1);
+
+      //--- 1. recursion budget (compression-derived)
+      recursionBudget = BudgetFromCompression(cs.compIdx);
+
+      //--- 2. find current owner
+      OwnershipResult own = Ownership::Pick(tree, count, OMEGA_OWN_MIN_ENERGY);
+
+      //--- 3. spawn root if none / spawn child on CHoCH against owner
+      bool noOwner = (own.index < 0);
+      if(noOwner && cs.dir != 0 && cs.p4h != 0.0 && cs.p4l != 0.0)
+        {
+         SpawnRoot(cs);
+         own = Ownership::Pick(tree, count, OMEGA_OWN_MIN_ENERGY);
+        }
+      else if(own.index >= 0)
+        {
+         int ownIdx = own.index;
+         int ownDir = tree[ownIdx].dir;
+         //-- CHoCH against owner direction triggers child spawn
+         if((ownDir == 1 && cs.bearCH) || (ownDir == -1 && cs.bullCH))
+            SpawnChild(ownIdx, -ownDir, cs);
+        }
+
+      //--- 4. update each alive node's energy / extreme
+      for(int i = 0; i < count; i++)
+        {
+         if(!tree[i].alive) continue;
+         //-- Root (depth 0): track chart-TF cycle extreme so origin/extreme
+         //   stay aligned with the wave engine. Children: track their own
+         //   extension extreme.
+         if(tree[i].depth == 0)
+           {
+            tree[i].dir     = cs.DirByOrigin();
+            tree[i].origin  = cs.inv == 0.0 ? tree[i].origin : cs.inv;
+            double e1 = (tree[i].dir == 1) ? ((cs.cycH == 0.0) ? bar1High : cs.cycH)
+                                            : ((cs.cycL == 0.0) ? bar1Low  : cs.cycL);
+            if(tree[i].dir == 1)  tree[i].extreme = MathMax(tree[i].extreme, e1);
+            if(tree[i].dir == -1) tree[i].extreme = (tree[i].extreme == 0.0) ? e1 : MathMin(tree[i].extreme, e1);
+           }
+         else
+           {
+            if(tree[i].dir == 1)  tree[i].extreme = MathMax(tree[i].extreme, bar1High);
+            if(tree[i].dir == -1) tree[i].extreme = (tree[i].extreme == 0.0) ? bar1Low : MathMin(tree[i].extreme, bar1Low);
+           }
+
+         bool prog = tree[i].Progressed(bar1High, bar1Low);
+         if(prog) tree[i].energy = MathMin(100.0, tree[i].energy + 7.0);
+         else     tree[i].energy = MathMax(0.0,   tree[i].energy - 2.0);
+         if(tree[i].energy > tree[i].forcePeak) tree[i].forcePeak = tree[i].energy;
+         tree[i].mat   = (tree[i].depth == 0) ? cs.waveProgress : tree[i].mat;
+         tree[i].comp  = cs.compIdx;
+         tree[i].state = tree[i].EmergentState();
+        }
+
+      //--- 5. detect death: energy <= 2 OR transfer break
+      datetime now = TimeCurrent();
+      for(int i = 0; i < count; i++)
+        {
+         if(!tree[i].alive) continue;
+         //-- TRANSFER? — counter child has crossed parent origin
+         if(tree[i].depth > 0)
+           {
+            int pIdx = IndexOfId(tree[i].parentId);
+            if(pIdx >= 0 && Transfer::IsTransferEvent(tree, count, i, pIdx, bar1Close))
+              {
+               Transfer::Apply(tree, count, pIdx, now);
+               transfersCount++;
+               OmegaLogger::LogWarning("TREE",
+                  StringFormat("TRANSFER · child #%I64d broke parent #%I64d · close=%.5f origin=%.5f",
+                               tree[i].id, tree[pIdx].id, bar1Close, tree[pIdx].origin));
+               chain.Sample(tree[pIdx].forceAtDeath);
+              }
+           }
+         //-- DEATH BY DECAY? — and merge if applicable
+         if(tree[i].energy <= 2.0)
+           {
+            ENUM_NODE_DEATH cause = NODE_DEATH_DECAY;
+            int pIdx = IndexOfId(tree[i].parentId);
+            if(tree[i].depth > 0 && pIdx >= 0
+               && Merge::IsMergeEvent(tree, count, i, pIdx, bar1Close))
+              {
+               Merge::Apply(tree, count, i, pIdx, now);
+               mergesCount++;
+               OmegaLogger::LogInfo("TREE",
+                  StringFormat("MERGE · child #%I64d -> parent #%I64d (campaign survived probe)",
+                               tree[i].id, tree[pIdx].id));
+               cause = NODE_DEATH_MERGED;
+              }
+            else
+              {
+               tree[i].alive       = false;
+               tree[i].deathTime   = now;
+               tree[i].deathCause  = cause;
+               tree[i].forceAtDeath= tree[i].energy;
+               decaysCount++;
+              }
+            chain.Sample(tree[i].forcePeak * 0.6); // sample at-death life proxy
+           }
+        }
+
+      //--- 6. recompute ownership AFTER deaths
+      own = Ownership::Pick(tree, count, OMEGA_OWN_MIN_ENERGY);
+      ownerIndex     = own.index;
+      ownerDir       = own.direction;
+      ownerDepth     = own.depth;
+      ownerEnergy    = own.energy;
+      ownerStability = own.stability;
+      ownerLife      = own.energy;       // Phase 4 will replace with real Life
+
+      //--- 7. tree summary
+      treeAlive = 0; treeDepth = 0;
+      for(int i = 0; i < count; i++)
+        {
+         if(!tree[i].alive) continue;
+         treeAlive++;
+         if(tree[i].depth > treeDepth) treeDepth = tree[i].depth;
+        }
+
+      //--- 8. sample chain on the dominant owner (smooth signal)
+      if(ownerIndex >= 0)
+         chain.Sample(ownerEnergy);
+
+      return true;
+     }
+
+   //--- Snapshot for heartbeat / explainability
+   string Snapshot() const
+     {
+      return StringFormat(
+         "owner=%d ownDir=%d ownE=%.0f ownStab=%.0f depth=%d/%d alive=%d trans=%I64d merge=%I64d decay=%I64d spawn=%I64d chain=%s(v=%.0f w=%.0f)",
+         ownerIndex, ownerDir, ownerEnergy, ownerStability,
+         treeDepth, recursionBudget, treeAlive,
+         transfersCount, mergesCount, decaysCount, spawnsCount,
+         ChainHealth::ScopeString(chain.Scope(ownerLife)),
+         chain.Vitality(), chain.WholeChainLife());
+     }
+  };
+
+#endif // __OMEGA_CURVE_TREE_MQH__
+
+//==================================================================
 //= MODULE: Curve/Curve
 //= Source: Include/Curve/Curve.mqh
 //==================================================================
@@ -2284,6 +3139,9 @@ public:
 
    //--- compression history (chart TF)
    CompressionTracker compress;
+
+   //--- recursive curve tree (Phase 3) — owner / transfer / merge / chain
+   OmegaCurveTree     tree;
 
    //--- composite (the gCurve object)
    int                gDir;
@@ -2327,6 +3185,7 @@ public:
       ok = ok && tfH1.Init (sym, PERIOD_H1,  pivotLen, structLen, impulseMult, chochBufATR, atrLen, effLen, effThresh, dispThresh, convMult);
       ok = ok && tfH4.Init (sym, PERIOD_H4,  pivotLen, structLen, impulseMult, chochBufATR, atrLen, effLen, effThresh, dispThresh, convMult);
       compress.Reset();
+      tree.Init(sym, chart_tf);
       OmegaLogger::LogInfo("CURVE",
          StringFormat("Init %s · ladder=M1/M3/M5/M15/H1/H4 · ok=%s", sym, ok?"true":"false"));
       return ok;
@@ -2373,11 +3232,17 @@ public:
       compress.Sample(chart);
       double tighten = compress.Tightening(5);
 
+      //--- Phase 3: feed the tree from the chart-TF curve state.
+      //    Tree updates own ownership / transfer / merge / chain health.
+      tree.Update(chart);
+
       gDir         = chart.DirByOrigin();
       gCompression = chart.compIdx;
       gConvexity   = ConvexityHelper::Score(chart);
       gMaturity    = ConvexityHelper::Maturity(chart);
-      gForce       = ForceHelper::Score(gCompression, tighten, /*residual*/ 50.0, /*recursion*/ 0);
+      //-- force composite now folds in residual energy + recursion depth from tree
+      double residualEnergy = (tree.ownerIndex >= 0) ? tree.tree[tree.ownerIndex].energy : 50.0;
+      gForce       = ForceHelper::Score(gCompression, tighten, residualEnergy, tree.treeDepth);
       gForceState  = ForceHelper::State(gForce);
       gForceTrend  = ForceHelper::TightenTrend(tighten);
 
@@ -2395,10 +3260,11 @@ public:
       supp.forceScore         = gForce;
       supp.compression        = gCompression;
       supp.convexity          = gConvexity;
-      supp.ownershipStability = OMEGA_TRINITY_NEUTRAL; // Phase 3
-      supp.chainHealth        = OMEGA_TRINITY_NEUTRAL; // Phase 3
-      supp.recursionDepth     = 0;                    // Phase 3
-      supp.recursionBudget    = 1;                    // Phase 3
+      //-- Phase 3 wires these from the tree
+      supp.ownershipStability = tree.ownerStability;
+      supp.chainHealth        = tree.chain.Score(tree.ownerLife);
+      supp.recursionDepth     = tree.treeDepth;
+      supp.recursionBudget    = tree.recursionBudget;
       //-- alignment: how many of the 6 TFs share the chart's direction
       int sameDir = 0;
       if(gDir != 0)
@@ -2420,11 +3286,12 @@ public:
    string Snapshot() const
      {
       return StringFormat(
-         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f align=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d",
+         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f align=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d · tree[%s]",
          gDir, gForce, ForceHelper::StateString(gForceState), gForceTrend,
          gCompression, gConvexity, gMaturity,
          tfM1.DirByOrigin(),  tfM3.DirByOrigin(),  tfM5.DirByOrigin(),
-         tfM15.DirByOrigin(), tfH1.DirByOrigin(),  tfH4.DirByOrigin());
+         tfM15.DirByOrigin(), tfH1.DirByOrigin(),  tfH4.DirByOrigin(),
+         tree.Snapshot());
      }
   };
 

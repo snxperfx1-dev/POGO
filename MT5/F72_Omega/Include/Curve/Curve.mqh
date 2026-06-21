@@ -23,6 +23,7 @@
 #include "Compression.mqh"
 #include "Convexity.mqh"
 #include "Force.mqh"
+#include "../Tree/CurveTree.mqh"
 #include "../Memory.mqh"
 
 class OmegaCurve
@@ -38,6 +39,9 @@ public:
 
    //--- compression history (chart TF)
    CompressionTracker compress;
+
+   //--- recursive curve tree (Phase 3) — owner / transfer / merge / chain
+   OmegaCurveTree     tree;
 
    //--- composite (the gCurve object)
    int                gDir;
@@ -81,6 +85,7 @@ public:
       ok = ok && tfH1.Init (sym, PERIOD_H1,  pivotLen, structLen, impulseMult, chochBufATR, atrLen, effLen, effThresh, dispThresh, convMult);
       ok = ok && tfH4.Init (sym, PERIOD_H4,  pivotLen, structLen, impulseMult, chochBufATR, atrLen, effLen, effThresh, dispThresh, convMult);
       compress.Reset();
+      tree.Init(sym, chart_tf);
       OmegaLogger::LogInfo("CURVE",
          StringFormat("Init %s · ladder=M1/M3/M5/M15/H1/H4 · ok=%s", sym, ok?"true":"false"));
       return ok;
@@ -127,11 +132,17 @@ public:
       compress.Sample(chart);
       double tighten = compress.Tightening(5);
 
+      //--- Phase 3: feed the tree from the chart-TF curve state.
+      //    Tree updates own ownership / transfer / merge / chain health.
+      tree.Update(chart);
+
       gDir         = chart.DirByOrigin();
       gCompression = chart.compIdx;
       gConvexity   = ConvexityHelper::Score(chart);
       gMaturity    = ConvexityHelper::Maturity(chart);
-      gForce       = ForceHelper::Score(gCompression, tighten, /*residual*/ 50.0, /*recursion*/ 0);
+      //-- force composite now folds in residual energy + recursion depth from tree
+      double residualEnergy = (tree.ownerIndex >= 0) ? tree.tree[tree.ownerIndex].energy : 50.0;
+      gForce       = ForceHelper::Score(gCompression, tighten, residualEnergy, tree.treeDepth);
       gForceState  = ForceHelper::State(gForce);
       gForceTrend  = ForceHelper::TightenTrend(tighten);
 
@@ -149,10 +160,11 @@ public:
       supp.forceScore         = gForce;
       supp.compression        = gCompression;
       supp.convexity          = gConvexity;
-      supp.ownershipStability = OMEGA_TRINITY_NEUTRAL; // Phase 3
-      supp.chainHealth        = OMEGA_TRINITY_NEUTRAL; // Phase 3
-      supp.recursionDepth     = 0;                    // Phase 3
-      supp.recursionBudget    = 1;                    // Phase 3
+      //-- Phase 3 wires these from the tree
+      supp.ownershipStability = tree.ownerStability;
+      supp.chainHealth        = tree.chain.Score(tree.ownerLife);
+      supp.recursionDepth     = tree.treeDepth;
+      supp.recursionBudget    = tree.recursionBudget;
       //-- alignment: how many of the 6 TFs share the chart's direction
       int sameDir = 0;
       if(gDir != 0)
@@ -174,11 +186,12 @@ public:
    string Snapshot() const
      {
       return StringFormat(
-         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f align=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d",
+         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f align=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d · tree[%s]",
          gDir, gForce, ForceHelper::StateString(gForceState), gForceTrend,
          gCompression, gConvexity, gMaturity,
          tfM1.DirByOrigin(),  tfM3.DirByOrigin(),  tfM5.DirByOrigin(),
-         tfM15.DirByOrigin(), tfH1.DirByOrigin(),  tfH4.DirByOrigin());
+         tfM15.DirByOrigin(), tfH1.DirByOrigin(),  tfH4.DirByOrigin(),
+         tree.Snapshot());
      }
   };
 

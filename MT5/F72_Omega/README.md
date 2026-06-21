@@ -40,7 +40,7 @@ This repo delivers the engine in compile-clean, runnable phases. Each phase plug
 |---|---|---|---|
 | **1 · Skeleton** | ✅ shipped | `EA · Common · Logger · Memory · CampaignDB · Capital · Risk · PaperTrade · Execution · Session · News` | Attach in OBSERVER mode, watch heartbeat + capital + trinity neutrality logged every N seconds |
 | **2 · Curve physics** | ✅ shipped | `Curve/CurvePhysics · CurveState · Compression · Convexity · Force · Curve` | Per-TF f_se / f_phys port across M1/M3/M5/M15/H1/H4. The Trinity becomes primed once the chart-TF curve is ready: LifeScore receives Force; supporting fields receive Compression, Convexity, MTF Alignment. |
-| **3 · Curve tree** | planned | `CurveNode · Ownership · Transfer · Merge · ChainHealth` | Recursive tree, ownership-by-energy, chain vitality |
+| **3 · Curve tree** | ✅ shipped | `Tree/CurveNode · Ownership · Transfer · Merge · ChainHealth · CurveTree` | Recursive event-spawned tree (root + children to 4-deep, budget set by compression). Ownership-by-energy (Principle 8). Transfer / Merge detection. Rolling chain vitality. Populates ownershipStability, chainHealth, recursionDepth/Budget. Force composite now folds in residualEnergy + recursionDepth from the tree. |
 | **4 · Narrative** | planned | `Story · LifeScore · NarrativeScore · Alignment · Confidence` | Trinity becomes primed; `LifeScore` and `StoryStability` go live |
 | **5 · Campaign positions** | planned | `Execution+ · PositionHealth · CampaignPositions` | Origin / Entry / Progression / Terminal positions, pyramiding, hedge transfer |
 | **6 · Self-observation** | planned | `Probability · SelfObservation · Capital throttle+` | Layer 12–14: probability clouds, confidence decay, regime detection |
@@ -66,15 +66,23 @@ MT5/F72_Omega/
 │  ├─ Execution.mqh             — decision gate (capital → risk → order)
 │  ├─ Session.mqh               — informational session context
 │  ├─ News.mqh                  — informational news hooks (Phase 7 wires feed)
-│  └─ Curve/                    — perception (Phase 2)
-│     ├─ CurvePhysics.mqh       — vel/acc/conv/csm/eff/disp + impulse/decay flags
-│     ├─ CurveState.mqh         — full f_se port: pivots, BOS/CHoCH, spawn engine,
-│     │                          flip zone, point4, cycle extremes, inducement
-│     ├─ Compression.mqh        — compression index + tightening tracker
-│     ├─ Convexity.mqh          — convexity score / shift sign / maturity
-│     ├─ Force.mqh              — composite force (compression persistence)
-│     └─ Curve.mqh              — multi-TF orchestrator + supporting writer
+│  ├─ Curve/                    — perception (Phase 2)
+│  │  ├─ CurvePhysics.mqh       — vel/acc/conv/csm/eff/disp + impulse/decay flags
+│  │  ├─ CurveState.mqh         — full f_se port: pivots, BOS/CHoCH, spawn engine,
+│  │  │                          flip zone, point4, cycle extremes, inducement
+│  │  ├─ Compression.mqh        — compression index + tightening tracker
+│  │  ├─ Convexity.mqh          — convexity score / shift sign / maturity
+│  │  ├─ Force.mqh              — composite force (compression persistence)
+│  │  └─ Curve.mqh              — multi-TF orchestrator + supporting writer
+│  └─ Tree/                     — recursive curve tree (Phase 3)
+│     ├─ CurveNode.mqh          — single curve in the tree (id/parent/dir/energy/state)
+│     ├─ Ownership.mqh          — Principle 8 dominant-owner picker + stability score
+│     ├─ Transfer.mqh           — child broke parent origin → new campaign
+│     ├─ Merge.mqh              — child died inside parent → parent reinforced
+│     ├─ ChainHealth.mqh        — chain vitality / scope (CURVE_ONLY / CHAIN_WEAKENING / WHOLE_DECAYING)
+│     └─ CurveTree.mqh          — orchestrator: spawn / energy / death / events / chain
 └─ README.md                    — this file
+└─ F72_Omega.mq5                — single-file bundle (regenerated from above)
 ```
 
 ---
