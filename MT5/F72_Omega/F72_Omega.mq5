@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.1"
+#define OMEGA_VERSION                "1.0.0-phase5.1.1"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -1186,6 +1186,18 @@ enum ENUM_OMEGA_TIER
    TIER_INSTITUTIONAL = 4    // >$500K — bounded by aggregate leverage
   };
 
+//=== Phase 5.1.1 — Undersized-trade behavior =======================
+//   When raw lot < broker volume_min, the engine clamps to broker_min
+//   which can FORCE actual risk above the tier ceiling. This enum
+//   says how to handle that case per-tier.
+enum ENUM_OMEGA_UNDERSIZED
+  {
+   UNDERSIZED_AUTO     = 0,   // SKIP for STANDARD+, PROCEED for MICRO/SMALL
+   UNDERSIZED_SKIP     = 1,   // never proceed when actual risk > tier ceiling
+   UNDERSIZED_PROCEED  = 2,   // always proceed at broker min, log oversized
+   UNDERSIZED_STRICT   = 3    // skip even when actual == intended (paranoid)
+  };
+
 class OmegaRisk
   {
 private:
@@ -1195,16 +1207,27 @@ private:
    double m_exceptional;
    double m_hardCeiling;
 
-   // Phase 5.1 — guard parameters
-   double m_minStopAtrMult;
+   // Phase 5.1 — global guard parameters
+   double m_minStopAtrMult;        // legacy (overridden by per-tier mults)
    int    m_minStopAtrPeriod;
-   double m_maxNotionalPct;     // per-ticket notional ≤ N% of equity
-   double m_microThreshold;     // < this → MICRO
-   double m_smallThreshold;     // < this → SMALL
-   double m_largeThreshold;     // < this → STANDARD; ≥ this → LARGE
-   double m_instThreshold;      // ≥ this → INSTITUTIONAL
-   bool   m_allowMicro;         // explicit consent to MICRO over-risk
-   double m_marginUseMaxPct;    // pre-trade: margin ≤ N% of free margin
+   double m_maxNotionalPct;
+   double m_microThreshold;
+   double m_smallThreshold;
+   double m_largeThreshold;
+   double m_instThreshold;
+   bool   m_allowMicro;
+   double m_marginUseMaxPct;
+
+   // Phase 5.1.1 — per-tier behavior matrix (idx = ENUM_OMEGA_TIER value)
+   double m_tierMaxRiskPct[5];     // ceiling  per tier (8 / 3 / 1 / 1 / 0.75)
+   double m_tierMinLife[5];        // floor    per tier (75 / 60 / 45 / 45 / 45)
+   double m_tierMinStab[5];        //                   (65 / 55 / 45 / 45 / 45)
+   double m_tierMinConf[5];        //                   (60 / 50 / 40 / 40 / 40)
+   int    m_tierMaxBudget[5];      // max pyramid adds (1 / 2 / 3 / 4 / 4)
+   double m_tierStopAtrMult[5];    // ATR floor mult   (1.25 / 0.85 / 0.75 / 0.75 / 0.75)
+
+   bool   m_centAccount;           // ÷100 displayed equity for tier/sizing
+   int    m_undersizedBehavior;    // ENUM_OMEGA_UNDERSIZED value
 
 public:
                      OmegaRisk()
@@ -1214,16 +1237,49 @@ public:
       m_strong      = 1.00;
       m_exceptional = 2.00;
       m_hardCeiling = 2.00;
-      // Phase 5.1 defaults — production-safe
+      // Phase 5.1 defaults
       m_minStopAtrMult    = 0.75;
       m_minStopAtrPeriod  = 14;
-      m_maxNotionalPct    = 1000.0;  // 10× equity per ticket
+      m_maxNotionalPct    = 1000.0;
       m_microThreshold    = 200.0;
       m_smallThreshold    = 1000.0;
       m_largeThreshold    = 50000.0;
       m_instThreshold     = 500000.0;
       m_allowMicro        = false;
       m_marginUseMaxPct   = 80.0;
+      // Phase 5.1.1 — per-tier matrix defaults (match the spec)
+      m_tierMaxRiskPct[TIER_MICRO]         = 8.00;
+      m_tierMaxRiskPct[TIER_SMALL]         = 3.00;
+      m_tierMaxRiskPct[TIER_STANDARD]      = 1.00;
+      m_tierMaxRiskPct[TIER_LARGE]         = 1.00;
+      m_tierMaxRiskPct[TIER_INSTITUTIONAL] = 0.75;
+      m_tierMinLife[TIER_MICRO]         = 75.0;
+      m_tierMinLife[TIER_SMALL]         = 60.0;
+      m_tierMinLife[TIER_STANDARD]      = 45.0;
+      m_tierMinLife[TIER_LARGE]         = 45.0;
+      m_tierMinLife[TIER_INSTITUTIONAL] = 45.0;
+      m_tierMinStab[TIER_MICRO]         = 65.0;
+      m_tierMinStab[TIER_SMALL]         = 55.0;
+      m_tierMinStab[TIER_STANDARD]      = 45.0;
+      m_tierMinStab[TIER_LARGE]         = 45.0;
+      m_tierMinStab[TIER_INSTITUTIONAL] = 45.0;
+      m_tierMinConf[TIER_MICRO]         = 60.0;
+      m_tierMinConf[TIER_SMALL]         = 50.0;
+      m_tierMinConf[TIER_STANDARD]      = 40.0;
+      m_tierMinConf[TIER_LARGE]         = 40.0;
+      m_tierMinConf[TIER_INSTITUTIONAL] = 40.0;
+      m_tierMaxBudget[TIER_MICRO]         = 1;
+      m_tierMaxBudget[TIER_SMALL]         = 2;
+      m_tierMaxBudget[TIER_STANDARD]      = 3;
+      m_tierMaxBudget[TIER_LARGE]         = 4;
+      m_tierMaxBudget[TIER_INSTITUTIONAL] = 4;
+      m_tierStopAtrMult[TIER_MICRO]         = 1.25;
+      m_tierStopAtrMult[TIER_SMALL]         = 0.85;
+      m_tierStopAtrMult[TIER_STANDARD]      = 0.75;
+      m_tierStopAtrMult[TIER_LARGE]         = 0.75;
+      m_tierStopAtrMult[TIER_INSTITUTIONAL] = 0.75;
+      m_centAccount         = false;
+      m_undersizedBehavior  = UNDERSIZED_AUTO;
      }
 
    void Init(double basePct, double normalPct, double strongPct, double excepPct, double ceilingPct = 2.0)
@@ -1260,7 +1316,52 @@ public:
                       allowMicro ? "YES" : "NO", marginUseMaxPct));
      }
 
-   //--- Tier resolution (live equity → tier).
+   //--- Phase 5.1.1 — install per-tier behavior matrix.
+   //    Order: MICRO, SMALL, STANDARD, LARGE, INSTITUTIONAL.
+   void InitTiers(double microMaxR, double smallMaxR, double stdMaxR, double largeMaxR, double instMaxR,
+                  double microL, double microS, double microC,
+                  double smallL, double smallS, double smallC,
+                  int microBudget, int smallBudget, int stdBudget, int largeBudget, int instBudget,
+                  double microStopAtr, double smallStopAtr, double stdStopAtr, double largeStopAtr, double instStopAtr,
+                  bool centAccount, int undersizedBehavior)
+     {
+      m_tierMaxRiskPct[TIER_MICRO]         = microMaxR;
+      m_tierMaxRiskPct[TIER_SMALL]         = smallMaxR;
+      m_tierMaxRiskPct[TIER_STANDARD]      = stdMaxR;
+      m_tierMaxRiskPct[TIER_LARGE]         = largeMaxR;
+      m_tierMaxRiskPct[TIER_INSTITUTIONAL] = instMaxR;
+      m_tierMinLife[TIER_MICRO] = microL; m_tierMinStab[TIER_MICRO] = microS; m_tierMinConf[TIER_MICRO] = microC;
+      m_tierMinLife[TIER_SMALL] = smallL; m_tierMinStab[TIER_SMALL] = smallS; m_tierMinConf[TIER_SMALL] = smallC;
+      m_tierMaxBudget[TIER_MICRO] = microBudget;
+      m_tierMaxBudget[TIER_SMALL] = smallBudget;
+      m_tierMaxBudget[TIER_STANDARD] = stdBudget;
+      m_tierMaxBudget[TIER_LARGE] = largeBudget;
+      m_tierMaxBudget[TIER_INSTITUTIONAL] = instBudget;
+      m_tierStopAtrMult[TIER_MICRO]         = microStopAtr;
+      m_tierStopAtrMult[TIER_SMALL]         = smallStopAtr;
+      m_tierStopAtrMult[TIER_STANDARD]      = stdStopAtr;
+      m_tierStopAtrMult[TIER_LARGE]         = largeStopAtr;
+      m_tierStopAtrMult[TIER_INSTITUTIONAL] = instStopAtr;
+      m_centAccount        = centAccount;
+      m_undersizedBehavior = undersizedBehavior;
+      OmegaLogger::LogInfo("RISK",
+         StringFormat("Tiers · ceil M/S/T/L/I=%.2f/%.2f/%.2f/%.2f/%.2f%% · MICRO floor L%.0f S%.0f C%.0f · SMALL floor L%.0f S%.0f C%.0f · pyramid M/S/T/L/I=%d/%d/%d/%d/%d · stopATR M/S/T/L/I=%.2f/%.2f/%.2f/%.2f/%.2f · cent=%s · undersized=%s",
+                      microMaxR, smallMaxR, stdMaxR, largeMaxR, instMaxR,
+                      microL, microS, microC, smallL, smallS, smallC,
+                      microBudget, smallBudget, stdBudget, largeBudget, instBudget,
+                      microStopAtr, smallStopAtr, stdStopAtr, largeStopAtr, instStopAtr,
+                      centAccount ? "YES" : "NO", UndersizedStr(undersizedBehavior)));
+     }
+
+   //--- Phase 5.1.1 — cent-aware effective equity. Use this everywhere
+   //    we classify tier or compute notional caps.
+   double EffectiveEquity(const OmegaCapital &cap) const
+     {
+      double raw = cap.Equity();
+      return m_centAccount ? (raw / 100.0) : raw;
+     }
+
+   //--- Tier resolution (live equity → tier) — applies cent correction.
    ENUM_OMEGA_TIER TierFor(double equity) const
      {
       if(equity < m_microThreshold)  return TIER_MICRO;
@@ -1268,6 +1369,11 @@ public:
       if(equity < m_largeThreshold)  return TIER_STANDARD;
       if(equity < m_instThreshold)   return TIER_LARGE;
       return TIER_INSTITUTIONAL;
+     }
+
+   ENUM_OMEGA_TIER TierForCap(const OmegaCapital &cap) const
+     {
+      return TierFor(EffectiveEquity(cap));
      }
 
    string TierStr(ENUM_OMEGA_TIER t) const
@@ -1283,32 +1389,46 @@ public:
       return "?";
      }
 
-   //--- Tier-aware conviction tier from the trinity.
-   //    MICRO  → only A+ setups (life≥75, stab≥75, conf≥70). Returns 0 to skip otherwise.
-   //    SMALL  → ALIVE-tier minimum (life≥60). Returns 0 to skip below that.
-   //    STD+   → full ladder.
+   string UndersizedStr(int m) const
+     {
+      switch(m)
+        {
+         case UNDERSIZED_AUTO:    return "AUTO";
+         case UNDERSIZED_SKIP:    return "SKIP";
+         case UNDERSIZED_PROCEED: return "PROCEED";
+         case UNDERSIZED_STRICT:  return "STRICT";
+        }
+      return "?";
+     }
+
+   //--- Per-tier accessors (used by CampaignPositions).
+   double TierMaxRiskPct(ENUM_OMEGA_TIER t) const { return m_tierMaxRiskPct[(int)t]; }
+   double TierMinLife(ENUM_OMEGA_TIER t)    const { return m_tierMinLife[(int)t]; }
+   double TierMinStab(ENUM_OMEGA_TIER t)    const { return m_tierMinStab[(int)t]; }
+   double TierMinConf(ENUM_OMEGA_TIER t)    const { return m_tierMinConf[(int)t]; }
+   int    TierMaxBudget(ENUM_OMEGA_TIER t)  const { return m_tierMaxBudget[(int)t]; }
+   double TierStopAtrMult(ENUM_OMEGA_TIER t) const { return m_tierStopAtrMult[(int)t]; }
+
+   //--- Phase 5.1.1 — per-tier conviction floor + per-tier risk ceiling.
+   //    Returns 0.0 to skip when state is below tier conviction floor;
+   //    otherwise returns the existing ladder pct, capped at tier ceiling
+   //    AND the global hard ceiling (whichever is lower).
    double RiskPctFor(const OmegaState &s, ENUM_OMEGA_TIER tier) const
      {
-      if(!s.primed) return m_base;
+      double cap = MathMin(TierMaxRiskPct(tier), m_hardCeiling);
+      if(!s.primed) return MathMin(m_base, cap);
+      if(tier == TIER_MICRO && !m_allowMicro) return 0.0;
+      if(s.life       < TierMinLife(tier)) return 0.0;
+      if(s.stability  < TierMinStab(tier)) return 0.0;
+      if(s.confidence < TierMinConf(tier)) return 0.0;
+      double pct = m_base;
       bool aPlus  = (s.life >= 75 && s.stability >= 75 && s.confidence >= 70);
       bool strong = (s.life >= 60 && s.stability >= 60 && s.confidence >= 55);
       bool normal = (s.life >= 45 && s.stability >= 45 && s.confidence >= 40);
-      if(tier == TIER_MICRO)
-        {
-         if(!m_allowMicro)   return 0.0;
-         return aPlus ? m_exceptional : 0.0;
-        }
-      if(tier == TIER_SMALL)
-        {
-         if(aPlus)           return m_exceptional;
-         if(strong)          return m_strong;
-         return 0.0;
-        }
-      // STANDARD / LARGE / INSTITUTIONAL — full ladder
-      if(aPlus)              return m_exceptional;
-      if(strong)             return m_strong;
-      if(normal)             return m_normal;
-      return m_base;
+      if(aPlus)        pct = m_exceptional;
+      else if(strong)  pct = m_strong;
+      else if(normal)  pct = m_normal;
+      return MathMin(pct, cap);
      }
 
    //--- Backwards-compatible legacy entrypoint (no tier).
@@ -1317,11 +1437,11 @@ public:
       return RiskPctFor(s, TIER_STANDARD);
      }
 
-   //--- Phase 5.1 — apply ATR floor to a raw stop distance (in points).
-   //    Caller must use the RETURNED value for both sizing AND the SL line.
-   double ResolveStopPoints(string symbol, double rawStopDistPoints) const
+   //--- Phase 5.1.1 — per-tier ATR stop floor.
+   double ResolveStopPoints(string symbol, double rawStopDistPoints, ENUM_OMEGA_TIER tier) const
      {
-      if(m_minStopAtrMult <= 0.0 || m_minStopAtrPeriod <= 0) return rawStopDistPoints;
+      double mult = TierStopAtrMult(tier);
+      if(mult <= 0.0 || m_minStopAtrPeriod <= 0) return rawStopDistPoints;
       int handle = iATR(symbol, _Period, m_minStopAtrPeriod);
       if(handle == INVALID_HANDLE) return rawStopDistPoints;
       double buf[];
@@ -1332,13 +1452,46 @@ public:
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
       if(point <= 0) return rawStopDistPoints;
       double atrPts   = buf[0] / point;
-      double floorPts = atrPts * m_minStopAtrMult;
+      double floorPts = atrPts * mult;
       return MathMax(rawStopDistPoints, floorPts);
+     }
+
+   //--- Backwards-compatible legacy entrypoint (no tier → STANDARD).
+   double ResolveStopPoints(string symbol, double rawStopDistPoints) const
+     {
+      return ResolveStopPoints(symbol, rawStopDistPoints, TIER_STANDARD);
+     }
+
+   //--- Phase 5.1.1 — compute the actual risk % from the final lots
+   //    after broker rounding. Used to detect "broker min forced
+   //    actual > intended" undersized scenarios.
+   double CalcActualRiskPct(string symbol, double lots, double stopDistPoints, double equity) const
+     {
+      if(lots <= 0 || stopDistPoints <= 0 || equity <= 0) return 0.0;
+      double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+      double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+      double point     = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(tickSize <= 0 || tickValue <= 0 || point <= 0) return 0.0;
+      double lossPerLot = (stopDistPoints * point / tickSize) * tickValue;
+      double lossMoney  = lossPerLot * lots;
+      return (lossMoney / equity) * 100.0;
+     }
+
+   //--- Phase 5.1.1 — decide whether to proceed when broker-min forces
+   //    actual > intended risk. Returns true to PROCEED, false to SKIP.
+   bool ResolveUndersized(ENUM_OMEGA_TIER tier, double intendedPct, double actualPct) const
+     {
+      if(actualPct <= intendedPct + 0.01) return true;          // not actually over (epsilon)
+      int mode = m_undersizedBehavior;
+      if(mode == UNDERSIZED_STRICT)  return false;
+      if(mode == UNDERSIZED_SKIP)    return false;
+      if(mode == UNDERSIZED_PROCEED) return true;
+      // AUTO: only MICRO and SMALL get to proceed at broker-min over-risk
+      return (tier == TIER_MICRO || tier == TIER_SMALL);
      }
 
    //--- Convert risk% + stop distance to broker-normalized lots.
    //    Phase 5.1: applies notional cap, broker bounds, step rounding.
-   //    Returns 0 lots if any input is invalid (suppresses entry).
    double LotsFor(string symbol, double riskPct, double stopDistPoints, const OmegaCapital &cap) const
      {
       riskPct = OmegaMath::Clamp(riskPct, 0.0, m_hardCeiling);
@@ -1346,7 +1499,7 @@ public:
       double effectivePct = riskPct * throttle;
       if(effectivePct <= 0.0) return 0.0;
 
-      double equity = cap.Equity();
+      double equity = EffectiveEquity(cap);
       double riskMoney = equity * effectivePct / 100.0;
 
       double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
@@ -1359,7 +1512,7 @@ public:
 
       double lots = riskMoney / lossPerLot;
 
-      //--- Phase 5.1: notional cap (per-ticket lots ≤ N% of equity ÷ contract value).
+      //--- notional cap (per-ticket lots ≤ N% of equity ÷ contract value).
       if(m_maxNotionalPct > 0.0)
         {
          double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
@@ -1394,7 +1547,7 @@ public:
       if(lots <= 0 || m_marginUseMaxPct <= 0.0) return true;
       double margin = 0.0;
       ENUM_ORDER_TYPE ot = (direction == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      if(!OrderCalcMargin(ot, symbol, lots, openPx, margin)) return true;  // can't check → proceed
+      if(!OrderCalcMargin(ot, symbol, lots, openPx, margin)) return true;
       double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
       if(freeMargin <= 0) return false;
       bool ok = (margin <= freeMargin * (m_marginUseMaxPct / 100.0));
@@ -1412,6 +1565,8 @@ public:
    double Exceptional() const { return m_exceptional; }
    double HardCeiling() const { return m_hardCeiling; }
    bool   AllowMicro()  const { return m_allowMicro; }
+   bool   CentAccount() const { return m_centAccount; }
+   int    UndersizedBehavior() const { return m_undersizedBehavior; }
   };
 
 #endif // __OMEGA_RISK_MQH__
@@ -5122,21 +5277,36 @@ public:
          OmegaLogger::LogException("POSITIONS", -1, "Open: dependencies not wired");
          return 0;
         }
-      //--- Phase 5.1: tier-aware sizing path with stop floor + margin precheck.
-      double equity   = m_capital.Equity();
-      ENUM_OMEGA_TIER tier = m_risk.TierFor(equity);
+      //--- Phase 5.1.1: tier-aware sizing path with stop floor + margin precheck
+      //    + pyramid budget check + undersized-trade behavior.
+      ENUM_OMEGA_TIER tier = m_risk.TierForCap(m_capital);
+      double effEquity = m_risk.EffectiveEquity(m_capital);
+
+      //--- Pyramid budget gate: refuse to add when same-side position
+      //    count has hit the per-tier budget.
+      int sideCount = CountByDirection(direction);
+      int tierBudget = m_risk.TierMaxBudget(tier);
+      if(sideCount >= tierBudget)
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · pyramid budget exhausted · tier=%s · open=%d / max=%d",
+                          m_symbol, m_risk.TierStr(tier), sideCount, tierBudget));
+         return 0;
+        }
+
       double riskPct  = m_risk.RiskPctFor(state, tier);
       if(riskPct <= 0.0)
         {
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · skipped · tier=%s · life=%.0f stab=%.0f conf=%.0f below tier conviction floor",
+            StringFormat("%s · skipped · tier=%s · life=%.0f stab=%.0f conf=%.0f below tier conviction floor (need L%.0f S%.0f C%.0f)",
                           m_symbol, m_risk.TierStr(tier),
-                          state.life, state.stability, state.confidence));
+                          state.life, state.stability, state.confidence,
+                          m_risk.TierMinLife(tier), m_risk.TierMinStab(tier), m_risk.TierMinConf(tier)));
          return 0;
         }
-      //--- Apply ATR floor to the stop BEFORE sizing & SL placement.
+      //--- Apply per-tier ATR floor to the stop BEFORE sizing & SL placement.
       double rawStop = stopDistPoints;
-      stopDistPoints = m_risk.ResolveStopPoints(m_symbol, stopDistPoints);
+      stopDistPoints = m_risk.ResolveStopPoints(m_symbol, stopDistPoints, tier);
       double lots    = m_risk.LotsFor(m_symbol, riskPct, stopDistPoints, m_capital);
       if(lots <= 0)
         {
@@ -5153,6 +5323,21 @@ public:
       double slDist = stopDistPoints * point;
       double sl     = (direction == 1) ? (openPx - slDist) : (openPx + slDist);
 
+      //--- Phase 5.1.1: actual-vs-intended risk check. After broker
+      //    rounding (clamp to volume_min) the effective risk can exceed
+      //    the tier ceiling. Decide skip-vs-proceed per InpUndersizedBehavior.
+      double actualPct = m_risk.CalcActualRiskPct(m_symbol, lots, stopDistPoints, effEquity);
+      bool   oversized = (actualPct > riskPct + 0.01);
+      if(oversized && !m_risk.ResolveUndersized(tier, riskPct, actualPct))
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · skipped · tier=%s · actual %.2f%% > intended %.2f%% (undersized=%s)",
+                          m_symbol, m_risk.TierStr(tier),
+                          actualPct, riskPct,
+                          m_risk.UndersizedStr(m_risk.UndersizedBehavior())));
+         return 0;
+        }
+
       //--- Phase 5.1: pre-trade margin precheck.
       if(!m_risk.PassesMarginCheck(m_symbol, direction, lots, openPx))
         {
@@ -5162,9 +5347,16 @@ public:
          return 0;
         }
 
+      //--- Phase 5.1.1 — enrich the trade comment so the user sees the
+      //    actual tier + intended-vs-actual risk in MT5's "Comment" column.
+      string tierTag = StringFormat("[%s int=%.2f%% act=%.2f%%%s]",
+                                     m_risk.TierStr(tier), riskPct, actualPct,
+                                     oversized ? " forced" : "");
+      string fullDetail = (StringLen(detail) > 0) ? (tierTag + " " + detail) : tierTag;
+
       ulong tk = (direction == 1)
-         ? m_trade.Buy(m_symbol, lots, sl, 0.0, reason, detail)
-         : m_trade.Sell(m_symbol, lots, sl, 0.0, reason, detail);
+         ? m_trade.Buy(m_symbol, lots, sl, 0.0, reason, fullDetail)
+         : m_trade.Sell(m_symbol, lots, sl, 0.0, reason, fullDetail);
       if(tk == 0)
         {
          OmegaLogger::LogWarning("POSITIONS",
@@ -5194,9 +5386,10 @@ public:
       m_pos[slot].currentSL      = sl;
       m_pos[slot].opened         = TimeCurrent();
       OmegaLogger::LogInfo("POSITIONS",
-         StringFormat("OPEN · %s · tier=%s risk=%.2f%% lots=%.2f sd=%.0f · %s",
+         StringFormat("OPEN · %s · tier=%s int=%.2f%% act=%.2f%%%s lots=%.2f sd=%.0f · %s",
                        PositionRoleStr::ToString(role), m_risk.TierStr(tier),
-                       riskPct, lots, stopDistPoints, m_pos[slot].Snapshot()));
+                       riskPct, actualPct, oversized ? " forced" : "",
+                       lots, stopDistPoints, m_pos[slot].Snapshot()));
       return tk;
      }
 
@@ -6658,6 +6851,36 @@ input double              InpInstTierEquity   = 500000.0;             // ≥ thi
 input bool                InpAllowMicroTier   = false;                // EXPLICIT consent: trade <$200 accounts (forced over-risk)
 input double              InpMarginUseMaxPct  = 80.0;                 // Pre-trade margin precheck: req ≤ N% free margin
 
+input group "═══ Phase 5.1.1 — Per-Tier Behavior Matrix ═══"
+input bool                InpCentAccount      = false;                // CENT account: divide displayed equity by 100 for tier classification
+input ENUM_OMEGA_UNDERSIZED InpUndersizedBehavior = UNDERSIZED_AUTO;   // What to do when broker min forces actual > intended
+//-- Per-tier risk ceilings (% per ticket)
+input double              InpMicroMaxRiskPct  = 8.00;                 // MICRO ceiling — broker min may force this
+input double              InpSmallMaxRiskPct  = 3.00;                 // SMALL ceiling — ALIVE-tier or above
+input double              InpStdMaxRiskPct    = 1.00;                 // STANDARD ceiling — production
+input double              InpLargeMaxRiskPct  = 1.00;                 // LARGE ceiling — production + notional cap
+input double              InpInstMaxRiskPct   = 0.75;                 // INSTITUTIONAL ceiling — leverage-bounded
+//-- MICRO-only conviction floor (only A+ trades earn a slot)
+input double              InpMicroMinLife     = 75.0;                 // MICRO min life
+input double              InpMicroMinStab     = 65.0;                 // MICRO min stability
+input double              InpMicroMinConf     = 60.0;                 // MICRO min confidence
+//-- SMALL-only conviction floor (ALIVE-tier or higher)
+input double              InpSmallMinLife     = 60.0;                 // SMALL min life
+input double              InpSmallMinStab     = 55.0;                 // SMALL min stability
+input double              InpSmallMinConf     = 50.0;                 // SMALL min confidence
+//-- Per-tier pyramid budget (max same-side positions per campaign)
+input int                 InpMicroMaxBudget   = 1;                    // MICRO — no pyramid
+input int                 InpSmallMaxBudget   = 2;                    // SMALL — light
+input int                 InpStdMaxBudget     = 3;                    // STANDARD — moderate
+input int                 InpLargeMaxBudget   = 4;                    // LARGE — full
+input int                 InpInstMaxBudget    = 4;                    // INSTITUTIONAL — full
+//-- Per-tier ATR stop multiplier (MICRO wider, larger tighter)
+input double              InpMicroStopAtr     = 1.25;                 // MICRO — wider stops, fewer stop-outs
+input double              InpSmallStopAtr     = 0.85;                 // SMALL — slightly wider
+input double              InpStdStopAtr       = 0.75;                 // STANDARD — production
+input double              InpLargeStopAtr     = 0.75;                 // LARGE — production
+input double              InpInstStopAtr      = 0.75;                 // INSTITUTIONAL — production
+
 input group "═══ Capital — drawdown circuit breakers ═══"
 input double              InpDailyLossLimit   = 3.0;                  // Daily loss limit (%)
 input double              InpWeeklyLossLimit  = 8.0;                  // Weekly loss limit (%)
@@ -6715,6 +6938,9 @@ ShadowLogger      g_shadow;      // Phase 7: optional parallel logger
 DecisionParams    g_dparams;     // Phase 5: decision tunables
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
+//-- Phase 5.1.1 tier-shift tracking (logs on >20% equity move OR tier change)
+ENUM_OMEGA_TIER g_lastTier        = TIER_STANDARD;
+double          g_lastTierEquity  = 0.0;
 
 //+------------------------------------------------------------------+
 //| OnInit                                                           |
@@ -6743,13 +6969,28 @@ int OnInit()
                      InpMicroTierEquity, InpSmallTierEquity,
                      InpLargeTierEquity, InpInstTierEquity,
                      InpAllowMicroTier, InpMarginUseMaxPct);
+   //--- 4.2 Phase 5.1.1 — install per-tier behavior matrix.
+   g_risk.InitTiers(InpMicroMaxRiskPct, InpSmallMaxRiskPct, InpStdMaxRiskPct,
+                    InpLargeMaxRiskPct, InpInstMaxRiskPct,
+                    InpMicroMinLife, InpMicroMinStab, InpMicroMinConf,
+                    InpSmallMinLife, InpSmallMinStab, InpSmallMinConf,
+                    InpMicroMaxBudget, InpSmallMaxBudget, InpStdMaxBudget,
+                    InpLargeMaxBudget, InpInstMaxBudget,
+                    InpMicroStopAtr, InpSmallStopAtr, InpStdStopAtr,
+                    InpLargeStopAtr, InpInstStopAtr,
+                    InpCentAccount, (int)InpUndersizedBehavior);
    {
-      double _eqNow = AccountInfoDouble(ACCOUNT_EQUITY);
-      ENUM_OMEGA_TIER _tNow = g_risk.TierFor(_eqNow);
+      double _eqRaw = AccountInfoDouble(ACCOUNT_EQUITY);
+      double _eqEff = InpCentAccount ? (_eqRaw / 100.0) : _eqRaw;
+      ENUM_OMEGA_TIER _tNow = g_risk.TierFor(_eqEff);
+      g_lastTier = _tNow;
+      g_lastTierEquity = _eqEff;
       OmegaLogger::LogInfo("EA",
-         StringFormat("Equity tier on init: %s @ %.2f %s",
-                       g_risk.TierStr(_tNow), _eqNow,
-                       AccountInfoString(ACCOUNT_CURRENCY)));
+         StringFormat("Equity tier on init: %s · raw=%.2f %s%s · effective=%.2f · cap=%.2f%%",
+                       g_risk.TierStr(_tNow), _eqRaw,
+                       AccountInfoString(ACCOUNT_CURRENCY),
+                       InpCentAccount ? " (cent)" : "",
+                       _eqEff, g_risk.TierMaxRiskPct(_tNow)));
    }
 
 //--- 5. Campaign memory
@@ -6845,6 +7086,31 @@ void OnTick()
    g_tickCount++;
    g_state.tickCount = g_tickCount;
    g_state.updated   = TimeCurrent();
+
+//--- Phase 5.1.1: tier-shift detection. Re-resolve tier; log a
+//    transition line whenever the tier changes OR the effective
+//    equity moves >20% from the last anchor. Cheap (no allocations).
+   {
+      double _eqRaw = AccountInfoDouble(ACCOUNT_EQUITY);
+      double _eqEff = InpCentAccount ? (_eqRaw / 100.0) : _eqRaw;
+      ENUM_OMEGA_TIER _tNow = g_risk.TierFor(_eqEff);
+      bool _tierChanged = (_tNow != g_lastTier);
+      bool _bigMove = (g_lastTierEquity > 0.0)
+                       ? (MathAbs(_eqEff - g_lastTierEquity) / g_lastTierEquity > 0.20)
+                       : false;
+      if(_tierChanged || _bigMove)
+        {
+         OmegaLogger::LogInfo("EA",
+            StringFormat("Tier shift · %s → %s · equity %.2f → %.2f%s · cap=%.2f%% · pyramid=%d",
+                          g_risk.TierStr(g_lastTier), g_risk.TierStr(_tNow),
+                          g_lastTierEquity, _eqEff,
+                          InpCentAccount ? " (cent-corrected)" : "",
+                          g_risk.TierMaxRiskPct(_tNow),
+                          g_risk.TierMaxBudget(_tNow)));
+         g_lastTier       = _tNow;
+         g_lastTierEquity = _eqEff;
+        }
+     }
 
 //--- Capital state machine — runs even before perception exists,
 //    so circuit breakers protect equity from any external losses
