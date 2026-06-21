@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.6"
+#define OMEGA_VERSION                "1.0.0-phase5.6.1"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -5406,17 +5406,21 @@ public:
    //--- Phase 5.5.4 — Phases status panel. Takes pre-formatted lines so
    //    the chart class doesn't depend on the new phase types. EA's
    //    OnTick builds the lines from each phase module.
+   //    Phase 5.6: added entryLine showing the actual entry-attempt
+   //    outcome — distinguishes "decision said ENTER but order didn't
+   //    open" from "decision said ENTER and order opened at <ticket>".
    void UpdatePhasesPanel(string fundedLine, string memLine, string attLine,
                            string portLine, string metaLine, string evolLine,
-                           string lastDecLine, color portColor = (color)0x000000,
+                           string lastDecLine, string entryLine = "",
+                           color portColor = (color)0x000000,
                            color metaColor = (color)0x000000, color attColor = (color)0x000000,
                            color fundedColor = (color)0x000000)
      {
       if(!m_enabled) return;
       int corner = CORNER_LEFT_LOWER;
       int X = 8, Y = 8;
-      int W = 360;
-      int rows = 8;
+      int W = 540;                         // wider — entry status can be long
+      int rows = 9;                         // +1 for entry row
       int H = m_lineHeight * rows + 14;
       EnsureRectLabel(N("PH_BG"), corner, X, Y + H - 14, W, H, m_bg, m_dim);
       int rx = X + 8;
@@ -5433,7 +5437,13 @@ public:
       EnsureLabel(N("PH_MC"),     corner, rx, ry + (rows - 6) * m_lineHeight, metaLine,
                    metaColor != (color)0x000000 ? metaColor : m_dim);
       EnsureLabel(N("PH_EV"),     corner, rx, ry + (rows - 7) * m_lineHeight, evolLine,    m_dim);
-      EnsureLabel(N("PH_EX"),     corner, rx, ry + 0,                           lastDecLine, m_dim);
+      EnsureLabel(N("PH_EX"),     corner, rx, ry + (rows - 8) * m_lineHeight, lastDecLine, m_dim);
+      // Phase 5.6 — entry status row at the bottom; coloured by content.
+      color ec = m_dim;
+      if(StringFind(entryLine, "OPENED") >= 0)        ec = m_bull;
+      else if(StringFind(entryLine, "SKIP") >= 0)     ec = m_warn;
+      else if(StringFind(entryLine, "BROKER") >= 0)   ec = m_bear;
+      EnsureLabel(N("PH_ENTRY"),  corner, rx, ry + 0, entryLine, ec);
      }
 
    //--- Called from CampaignPositions::Open after a successful entry.
@@ -6202,6 +6212,10 @@ public:
       int tierBudget = m_risk.TierMaxBudget(tier);
       if(sideCount >= tierBudget)
         {
+         g_entryStatus = StringFormat("SKIP: pyramid full (tier=%s %d/%d)",
+                                        m_risk.TierStr(tier), sideCount, tierBudget);
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · pyramid budget exhausted · tier=%s · open=%d / max=%d",
                           m_symbol, m_risk.TierStr(tier), sideCount, tierBudget));
@@ -6222,6 +6236,10 @@ public:
         {
          //   Only catastrophic conditions reach here (MICRO opt-out,
          //   tier cap zero, etc.). Log and return.
+         g_entryStatus = StringFormat("SKIP: riskPct=0 (tier=%s — likely MICRO opt-out)",
+                                        m_risk.TierStr(tier));
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · skipped (catastrophic) · tier=%s conv=%.0f EV=%.2f → riskPct=0.0",
                           m_symbol, m_risk.TierStr(tier), conviction, evMult));
@@ -6233,6 +6251,10 @@ public:
       double lots    = m_risk.LotsFor(m_symbol, riskPct, stopDistPoints, m_capital);
       if(lots <= 0)
         {
+         g_entryStatus = StringFormat("SKIP: zero lots (tier=%s risk=%.2f%% sd=%.0f)",
+                                        m_risk.TierStr(tier), riskPct, stopDistPoints);
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · zero lots · tier=%s risk=%.2f%% sd=%.0f (raw %.0f)",
                           m_symbol, m_risk.TierStr(tier), riskPct, stopDistPoints, rawStop));
@@ -6251,6 +6273,11 @@ public:
       bool   oversized = (actualPct > riskPct + 0.01);
       if(oversized && !m_risk.ResolveUndersized(tier, riskPct, actualPct))
         {
+         g_entryStatus = StringFormat("SKIP: broker-min over-risk (act %.2f%% > int %.2f%% policy=%s)",
+                                        actualPct, riskPct,
+                                        m_risk.UndersizedStr(m_risk.UndersizedBehavior()));
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · skipped (broker-min over-risk) · tier=%s · actual %.2f%% > intended %.2f%% (undersized=%s)",
                           m_symbol, m_risk.TierStr(tier),
@@ -6262,6 +6289,9 @@ public:
       //--- Catastrophic: pre-trade margin precheck.
       if(!m_risk.PassesMarginCheck(m_symbol, direction, lots, openPx))
         {
+         g_entryStatus = StringFormat("SKIP: margin precheck fail (lots=%.2f)", lots);
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · skipped (margin) · lots=%.2f openPx=%.5f", m_symbol, lots, openPx));
          return 0;
@@ -6280,6 +6310,10 @@ public:
          : m_trade.Sell(m_symbol, lots, sl, 0.0, reason, fullDetail);
       if(tk == 0)
         {
+         g_entryStatus = StringFormat("SKIP: BROKER REJECTED %s lots=%.2f (check Experts log for retcode)",
+                                        direction == 1 ? "BUY" : "SELL", lots);
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("POSITIONS",
             StringFormat("%s · order failed · dir=%d lots=%.2f", m_symbol, direction, lots));
          return 0;
@@ -6311,6 +6345,14 @@ public:
                        PositionRoleStr::ToString(role), m_risk.TierStr(tier),
                        riskPct, actualPct, oversized ? " forced" : "",
                        lots, stopDistPoints, m_pos[slot].Snapshot()));
+      //--- Phase 5.6 — explicit success record so the HUD shows the user
+      //    a trade actually opened (not just "engine wanted to").
+      g_entryStatus = StringFormat("OPENED #%I64u %s %.2f lots @ %.5f (conv=%.0f EV=%.2f int=%.2f%% act=%.2f%%)",
+                                     tk, direction == 1 ? "BUY" : "SELL", lots, openPx,
+                                     conviction >= 0 ? conviction : -1.0, evMult,
+                                     riskPct, actualPct);
+      g_entryStatusTime = TimeCurrent();
+      g_entryAttempts++; g_entrySuccesses++;
       //--- Phase 5.5: notify the chart layer so it drops a marker arrow
       //    at the entry bar with tier + actual-vs-intended risk in the tooltip.
       g_chart.OnPositionOpen(m_symbol, tk, direction, openPx, sl,
@@ -6938,6 +6980,9 @@ public:
       ENUM_OMEGA_CAPITAL_STATE cs = m_capital.State();
       if(cs == CAPITAL_SUSPENDED)
         {
+         g_entryStatus = "SKIP: CAPITAL SUSPENDED (kill switch / hard DD)";
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
                                    REASON_HARD_LIMIT,
                                    state.life, state.stability, state.confidence,
@@ -6950,6 +6995,9 @@ public:
                          dec == OMEGA_DEC_REVERSE);
       if(cs == CAPITAL_RESTRICTED && isEntryDec)
         {
+         g_entryStatus = "SKIP: CAPITAL RESTRICTED (daily/weekly DD halt)";
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
                                    REASON_DAILY_LIMIT,
                                    state.life, state.stability, state.confidence,
@@ -6964,6 +7012,9 @@ public:
         }
       if(stopDistPts <= 0 && isEntryDec)
         {
+         g_entryStatus = StringFormat("SKIP: invalid stopDistPts=%.0f (curve atr=0?)", stopDistPts);
+         g_entryStatusTime = TimeCurrent();
+         g_entryAttempts++; g_entrySkips++;
          OmegaLogger::LogWarning("EXEC",
             StringFormat("%s · %s · invalid stopDistPts %.0f — skipped",
                           symbol, OmegaStr::DecisionToString(dec), stopDistPts));
@@ -8946,6 +8997,15 @@ DecisionParams    g_dparams;     // Phase 5: decision tunables
 //-- Phase 5.5: g_chart, g_lastDecision, g_lastReason are declared at file
 //   scope right after the Chart module so class methods (e.g.
 //   CampaignPositions::Open) can reference them without forward-decl issues.
+//-- Phase 5.6: every entry-attempt outcome is captured in g_entryStatus
+//   so the HUD can show whether the last decision actually opened a
+//   trade — and if not, exactly which line skipped it. Removes the
+//   "engine is silent for some reason" mystery.
+string   g_entryStatus       = "(no entry attempt yet)";
+datetime g_entryStatusTime   = 0;
+int      g_entryAttempts     = 0;
+int      g_entrySuccesses    = 0;
+int      g_entrySkips        = 0;
 //-- Phases 5.2 / 9 / 10..14 — globals
 OmegaFunded         g_funded;       // Phase 5.2 — FTMO funded mode
 CampaignArchive     g_archive;      // Phase 9   — campaign memory + similarity
@@ -9230,6 +9290,9 @@ void OnTick()
            {
             if(g_funded.BlocksEntries())
               {
+               g_entryStatus = "SKIP: FUNDED MODE TRIP — " + g_funded.TripStr() + " · " + g_funded.TripReason();
+               g_entryStatusTime = TimeCurrent();
+               g_entryAttempts++; g_entrySkips++;
                OmegaLogger::LogWarning("FUNDED",
                   "Entry suppressed · " + g_funded.TripStr() + " · " + g_funded.TripReason());
                dr.decision = OMEGA_DEC_OBSERVE;
@@ -9238,6 +9301,10 @@ void OnTick()
               }
             else if(g_portfolio.CapMultiplier() <= 0.001)
               {
+               g_entryStatus = StringFormat("SKIP: PORTFOLIO CAP — aggLev %.0f%% >= cap %.0f%%",
+                                              g_portfolio.AggLeveragePct(), g_portfolio.MaxAggLevPct());
+               g_entryStatusTime = TimeCurrent();
+               g_entryAttempts++; g_entrySkips++;
                OmegaLogger::LogWarning("PORTFOLIO",
                   StringFormat("Entry suppressed · aggLev %.0f%% >= cap %.0f%%",
                                 g_portfolio.AggLeveragePct(), g_portfolio.MaxAggLevPct()));
@@ -9322,8 +9389,23 @@ void OnTick()
         }
       else
          exLine = "Last: (no decisions yet)";
+      //   Phase 5.6: surface the actual entry-attempt outcome so the
+      //   user can see whether the engine actually OPENED a position
+      //   or which line skipped it. If status is fresh (<120 sec old)
+      //   it's the live status; otherwise shows today's totals.
+      datetime now = TimeCurrent();
+      string entryLine;
+      if(g_entryStatusTime > 0 && now - g_entryStatusTime < 120)
+         entryLine = StringFormat("Entry [%I64ds ago] %s",
+                                    (long)(now - g_entryStatusTime),
+                                    g_entryStatus);
+      else
+         entryLine = StringFormat("Entry today: %d att · %d opened · %d skipped · last: %s",
+                                    g_entryAttempts, g_entrySuccesses, g_entrySkips,
+                                    g_entryStatus);
+      if(StringLen(entryLine) > 130) entryLine = StringSubstr(entryLine, 0, 129);
       g_chart.UpdatePhasesPanel(fundedLine, memLine, attLine, portLine,
-                                 metaLine, evolLine, exLine);
+                                 metaLine, evolLine, exLine, entryLine);
    }
   }
 
