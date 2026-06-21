@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v56", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v57", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -2612,6 +2612,17 @@ if barstate.islast and showTree
             array.push(tree_lbls, label.new(bar_index + 22 + f_slotX(_mig618), _mig618, (_cpState == "PERSISTING" ? "OWNERSHIP MIGRATED · defends 0.5–0.618" : "watch 0.5–0.618") + " · F" + str.tostring(math.round(_cpForce)) + " " + _cpTrend, style = label.style_label_left, color = color.new(_mc, 22), textcolor = #04130c, size = size.small))
     // the hold-vs-flip verdict — far-right, also laned
     array.push(tree_lbls, label.new(bar_index + 42 + f_slotX(close), close, _aliveTx + "  (life " + str.tostring(math.round(_life)) + ")", style = label.style_label_left, color = color.new(_aliveCol, 18), textcolor = #0a0e27, size = size.small))
+    // ── CURVE BUDGET + LIKELY DESTINATION — how many curves can still form (the
+    //    recursion budget set by compression) and where price is most likely headed
+    //    (the wave objective; via sub-curves if budget remains, else direct). ───────
+    string _budTier = gCurve.compress >= 75 ? "failure swing" : gCurve.compress >= 50 ? "compressed" : gCurve.compress >= 25 ? "medium" : "wide"
+    float  _budY = _ownDirT == -1 ? math.min(low, nz(_ownExt, low)) - atr * 0.6 : math.max(high, nz(_ownExt, high)) + atr * 0.6
+    array.push(tree_lbls, label.new(bar_index + 6 + f_slotX(_budY), _budY, "◈ CURVE BUDGET  " + str.tostring(_treeDepth) + " / " + str.tostring(_curveBudgetDepth) + " · " + _budTier, style = label.style_label_left, color = color.new(#1e1b4b, 10), textcolor = #c4b5fd, size = size.small))
+    float _likely = nz(waveObj, nz(eae_primaryAttractorPrice, se5_tgt))
+    if not na(_likely)
+        int _budLeft = _curveBudgetDepth - _treeDepth
+        array.push(tree_lines, line.new(bar_index, close, bar_index + 16, _likely, color = color.new(#fbbf24, 10), width = 2, style = line.style_arrow_right))
+        array.push(tree_lbls, label.new(bar_index + 16 + f_slotX(_likely), _likely, "▸ LIKELY  " + str.tostring(math.round_to_mintick(_likely)) + (_budLeft > 0 ? "  (via ~" + str.tostring(_budLeft) + " more curve" + (_budLeft > 1 ? "s)" : ")") : "  (direct)"), style = label.style_label_left, color = color.new(#fbbf24, 12), textcolor = #0d1117, size = size.normal))
 
 // ── FLIP ZONE on chart — the chart wave's order-block / flip zone (flipTop..flipBot),
 //    extended right and clearly marked, coloured by wave direction. ──────────────
