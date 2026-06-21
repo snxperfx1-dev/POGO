@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.5.3"
+#define OMEGA_VERSION                "1.0.0-phase14"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -5365,6 +5365,9 @@ public:
    void SetNarrativeAlignMin(double v) { m_narrAlignMin = v; }
 
    //--- Per-tick update (called from EA OnTick).
+   //    Phase 5.5.4: kept narrow — does not reference the late-declared
+   //    Phase 5.2/9/10/11/12/13/14 classes. The EA passes their
+   //    pre-formatted status as a string array to UpdatePhasesPanel.
    void Update(const OmegaState &state, OmegaCurve &curve,
                OmegaRisk &risk, OmegaCapital &capital,
                OmegaStory &story,
@@ -5383,6 +5386,39 @@ public:
       if(m_drawFU)     UpdateFUMarks();
 
       ChartRedraw(0);
+     }
+
+   //--- Phase 5.5.4 — Phases status panel. Takes pre-formatted lines so
+   //    the chart class doesn't depend on the new phase types. EA's
+   //    OnTick builds the lines from each phase module.
+   void UpdatePhasesPanel(string fundedLine, string memLine, string attLine,
+                           string portLine, string metaLine, string evolLine,
+                           string lastDecLine, color portColor = (color)0x000000,
+                           color metaColor = (color)0x000000, color attColor = (color)0x000000,
+                           color fundedColor = (color)0x000000)
+     {
+      if(!m_enabled) return;
+      int corner = CORNER_LEFT_LOWER;
+      int X = 8, Y = 8;
+      int W = 360;
+      int rows = 8;
+      int H = m_lineHeight * rows + 14;
+      EnsureRectLabel(N("PH_BG"), corner, X, Y + H - 14, W, H, m_bg, m_dim);
+      int rx = X + 8;
+      int ry = Y + 8;
+      EnsureLabel(N("PH_TITLE"), corner, rx, ry + (rows - 1) * m_lineHeight,
+                   "PHASES STATUS", m_fg, 10, "Consolas");
+      EnsureLabel(N("PH_FUNDED"), corner, rx, ry + (rows - 2) * m_lineHeight, fundedLine,
+                   fundedColor != (color)0x000000 ? fundedColor : m_dim);
+      EnsureLabel(N("PH_MEM"),    corner, rx, ry + (rows - 3) * m_lineHeight, memLine,    m_dim);
+      EnsureLabel(N("PH_ATT"),    corner, rx, ry + (rows - 4) * m_lineHeight, attLine,
+                   attColor != (color)0x000000 ? attColor : m_dim);
+      EnsureLabel(N("PH_PORT"),   corner, rx, ry + (rows - 5) * m_lineHeight, portLine,
+                   portColor != (color)0x000000 ? portColor : m_dim);
+      EnsureLabel(N("PH_MC"),     corner, rx, ry + (rows - 6) * m_lineHeight, metaLine,
+                   metaColor != (color)0x000000 ? metaColor : m_dim);
+      EnsureLabel(N("PH_EV"),     corner, rx, ry + (rows - 7) * m_lineHeight, evolLine,    m_dim);
+      EnsureLabel(N("PH_EX"),     corner, rx, ry + 0,                           lastDecLine, m_dim);
      }
 
    //--- Called from CampaignPositions::Open after a successful entry.
@@ -5853,8 +5889,6 @@ OmegaChart g_chart;
 //-- Phase 5.5: track last decision so the HUD can show what the engine just did
 ENUM_OMEGA_DECISION g_lastDecision = OMEGA_DEC_OBSERVE;
 ENUM_OMEGA_REASON   g_lastReason   = REASON_PHASE_NOT_BUILT;
-
-
 //==================================================================
 //= MODULE: Position/PositionHealth
 //= Source: Include/Position/PositionHealth.mqh
@@ -7706,7 +7740,970 @@ public:
 //|   Phase roadmap is in MT5/F72_Omega/README.md.                   |
 //+------------------------------------------------------------------+
 
-//================== INPUTS ==========================================
+//==================================================================
+//= MODULE: Funded  (Phase 5.2 — FTMO/prop funded-account overlay)
+//= Source: Include/Funded.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Daily DD watchdog · total DD watchdog · profit-target tracker · |
+//|  news blackout · weekend flat · consistency manager · post-target|
+//|  risk reduction. Pure overlay on top of the equity-tier guards.  |
+//|  When any rule trips, the module CLOSES POSITIONS and returns    |
+//|  TripState != NONE so the EA suppresses new entries.             |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_FUNDED_MQH__
+#define __OMEGA_FUNDED_MQH__
+
+enum ENUM_OMEGA_FUNDED_FIRM
+  {
+   FUNDED_OFF        = 0,
+   FUNDED_FTMO       = 1,
+   FUNDED_THE5ERS    = 2,
+   FUNDED_FUNDEDNEXT = 3,
+   FUNDED_CUSTOM     = 4
+  };
+
+enum ENUM_OMEGA_FUNDED_TRIP
+  {
+   FUNDED_TRIP_NONE         = 0,
+   FUNDED_TRIP_DAILY_DD     = 1,
+   FUNDED_TRIP_TOTAL_DD     = 2,
+   FUNDED_TRIP_NEWS         = 3,
+   FUNDED_TRIP_WEEKEND      = 4,
+   FUNDED_TRIP_CONSISTENCY  = 5,
+   FUNDED_TRIP_POST_TARGET  = 6
+  };
+
+class OmegaFunded
+  {
+private:
+   bool     m_enabled;
+   ENUM_OMEGA_FUNDED_FIRM m_firm;
+   double   m_dailyDDPct;        // hard limit (firm rule)
+   double   m_totalDDPct;
+   double   m_targetPct;
+   double   m_dailyHaltPct;      // soft halt (engine pause buffer)
+   double   m_totalHaltPct;
+   double   m_postTargetRiskMult;// 0.25 = run at 25% normal after target
+   double   m_dailyMaxProfitPct; // consistency rule limit
+   bool     m_weekendFlat;
+   int      m_fridayCloseHourGmt;
+   bool     m_newsBlackout;
+   int      m_newsBlackoutMin;
+
+   // runtime state
+   datetime m_anchorDay;
+   double   m_dayStartEquity;
+   double   m_evalStartEquity;
+   double   m_dayHighEquity;
+   double   m_peakEquity;
+   ENUM_OMEGA_FUNDED_TRIP m_trip;
+   string   m_tripReason;
+   bool     m_targetHit;
+   double   m_dailyHighProfitPct; // for consistency
+   double   m_lastReportedDdPctDay;
+   double   m_lastReportedDdPctTotal;
+
+public:
+                     OmegaFunded()
+     {
+      m_enabled = false; m_firm = FUNDED_OFF;
+      m_dailyDDPct = 5.0; m_totalDDPct = 10.0; m_targetPct = 10.0;
+      m_dailyHaltPct = 4.0; m_totalHaltPct = 8.0;
+      m_postTargetRiskMult = 0.25; m_dailyMaxProfitPct = 50.0;
+      m_weekendFlat = true; m_fridayCloseHourGmt = 21;
+      m_newsBlackout = true; m_newsBlackoutMin = 30;
+      m_anchorDay = 0; m_dayStartEquity = 0; m_evalStartEquity = 0;
+      m_dayHighEquity = 0; m_peakEquity = 0;
+      m_trip = FUNDED_TRIP_NONE; m_tripReason = "";
+      m_targetHit = false; m_dailyHighProfitPct = 0;
+      m_lastReportedDdPctDay = 0; m_lastReportedDdPctTotal = 0;
+     }
+
+   void Init(bool enabled, ENUM_OMEGA_FUNDED_FIRM firm,
+             double dailyDdPct, double totalDdPct, double targetPct,
+             double dailyHaltPct, double totalHaltPct,
+             double postTargetMult, double dailyMaxProfitPct,
+             bool weekendFlat, int fridayCloseHourGmt,
+             bool newsBlackout, int newsBlackoutMin)
+     {
+      m_enabled = enabled;
+      m_firm    = firm;
+      // Apply firm presets unless CUSTOM
+      if(firm == FUNDED_FTMO)
+        { m_dailyDDPct = 5.0; m_totalDDPct = 10.0; m_targetPct = 10.0;
+          m_dailyHaltPct = 4.0; m_totalHaltPct = 8.0; }
+      else if(firm == FUNDED_THE5ERS)
+        { m_dailyDDPct = 4.0; m_totalDDPct = 6.0; m_targetPct = 6.0;
+          m_dailyHaltPct = 3.0; m_totalHaltPct = 5.0; }
+      else if(firm == FUNDED_FUNDEDNEXT)
+        { m_dailyDDPct = 5.0; m_totalDDPct = 10.0; m_targetPct = 8.0;
+          m_dailyHaltPct = 4.0; m_totalHaltPct = 8.0; }
+      else
+        { m_dailyDDPct = dailyDdPct; m_totalDDPct = totalDdPct;
+          m_targetPct = targetPct; m_dailyHaltPct = dailyHaltPct;
+          m_totalHaltPct = totalHaltPct; }
+      m_postTargetRiskMult  = postTargetMult;
+      m_dailyMaxProfitPct   = dailyMaxProfitPct;
+      m_weekendFlat         = weekendFlat;
+      m_fridayCloseHourGmt  = fridayCloseHourGmt;
+      m_newsBlackout        = newsBlackout;
+      m_newsBlackoutMin     = newsBlackoutMin;
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+      m_evalStartEquity = eq;
+      m_dayStartEquity  = eq;
+      m_dayHighEquity   = eq;
+      m_peakEquity      = eq;
+      m_anchorDay       = (TimeCurrent() / 86400) * 86400;
+      OmegaLogger::LogInfo("FUNDED",
+         StringFormat("Init · enabled=%s firm=%d · dDD=%.1f%%/halt=%.1f%% · tDD=%.1f%%/halt=%.1f%% · tgt=%.1f%% · weekendFlat=%s newsBlackout=%s",
+                       enabled ? "YES" : "NO", (int)firm,
+                       m_dailyDDPct, m_dailyHaltPct, m_totalDDPct, m_totalHaltPct,
+                       m_targetPct, m_weekendFlat ? "Y" : "N", m_newsBlackout ? "Y" : "N"));
+     }
+
+   //--- Update on every tick. Returns the trip state — caller (EA)
+   //    inspects it and either suppresses entries or closes all.
+   ENUM_OMEGA_FUNDED_TRIP Update(OmegaNewsCalendar &news)
+     {
+      if(!m_enabled) { m_trip = FUNDED_TRIP_NONE; return m_trip; }
+      datetime now = TimeCurrent();
+      double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+
+      //-- daily anchor reset at midnight
+      datetime today = (now / 86400) * 86400;
+      if(today != m_anchorDay)
+        {
+         m_anchorDay = today;
+         m_dayStartEquity = eq;
+         m_dayHighEquity  = eq;
+         m_dailyHighProfitPct = 0;
+         m_trip = FUNDED_TRIP_NONE;
+         OmegaLogger::LogInfo("FUNDED",
+            StringFormat("New trading day · anchor equity=%.2f", eq));
+        }
+      if(eq > m_dayHighEquity) m_dayHighEquity = eq;
+      if(eq > m_peakEquity)    m_peakEquity   = eq;
+
+      //-- daily DD (vs day open)
+      double ddDay = (m_dayStartEquity > 0)
+                       ? (m_dayStartEquity - eq) / m_dayStartEquity * 100.0 : 0.0;
+      //-- total DD (vs eval start)
+      double ddTot = (m_evalStartEquity > 0)
+                       ? (m_evalStartEquity - eq) / m_evalStartEquity * 100.0 : 0.0;
+      m_lastReportedDdPctDay   = ddDay;
+      m_lastReportedDdPctTotal = ddTot;
+
+      //-- profit %% vs eval start
+      double profitPct = (m_evalStartEquity > 0)
+                          ? (eq - m_evalStartEquity) / m_evalStartEquity * 100.0 : 0.0;
+      double dayProfitPct = (m_dayStartEquity > 0)
+                             ? (eq - m_dayStartEquity) / m_dayStartEquity * 100.0 : 0.0;
+      if(dayProfitPct > m_dailyHighProfitPct) m_dailyHighProfitPct = dayProfitPct;
+
+      //-- target hit?
+      if(!m_targetHit && profitPct >= m_targetPct)
+        {
+         m_targetHit = true;
+         OmegaLogger::LogInfo("FUNDED",
+            StringFormat("PROFIT TARGET HIT · profit %.2f%% >= target %.2f%% · risk reduced to %.0f%%",
+                          profitPct, m_targetPct, m_postTargetRiskMult * 100.0));
+        }
+
+      //-- DD trips
+      if(ddTot >= m_totalHaltPct)
+        {
+         m_trip = FUNDED_TRIP_TOTAL_DD;
+         m_tripReason = StringFormat("Total DD %.2f%% >= halt %.2f%%", ddTot, m_totalHaltPct);
+         return m_trip;
+        }
+      if(ddDay >= m_dailyHaltPct)
+        {
+         m_trip = FUNDED_TRIP_DAILY_DD;
+         m_tripReason = StringFormat("Daily DD %.2f%% >= halt %.2f%%", ddDay, m_dailyHaltPct);
+         return m_trip;
+        }
+      //-- consistency rule (single day captures > N% of total target)
+      if(m_dailyMaxProfitPct > 0 && m_targetPct > 0 &&
+         m_dailyHighProfitPct >= m_targetPct * m_dailyMaxProfitPct / 100.0)
+        {
+         m_trip = FUNDED_TRIP_CONSISTENCY;
+         m_tripReason = StringFormat("Day profit %.2f%% would breach consistency rule",
+                                      m_dailyHighProfitPct);
+         return m_trip;
+        }
+      //-- weekend flat
+      if(m_weekendFlat)
+        {
+         MqlDateTime t; TimeToStruct(now, t);
+         if(t.day_of_week == 5 && t.hour >= m_fridayCloseHourGmt)
+           {
+            m_trip = FUNDED_TRIP_WEEKEND;
+            m_tripReason = "Weekend close window";
+            return m_trip;
+           }
+         if(t.day_of_week == 6 || t.day_of_week == 0)
+           {
+            m_trip = FUNDED_TRIP_WEEKEND;
+            m_tripReason = "Weekend";
+            return m_trip;
+           }
+        }
+      //-- news blackout (uses existing OmegaNewsCalendar)
+      if(m_newsBlackout)
+        {
+         //-- proxy: if news.CurrentEnvironment() reports HIGH IMPACT
+         //   within the lookahead window, blackout
+         string env = news.CurrentEnvironment();
+         if(StringFind(env, "HIGH") >= 0 || StringFind(env, "BLACKOUT") >= 0)
+           {
+            m_trip = FUNDED_TRIP_NEWS;
+            m_tripReason = "News blackout · " + env;
+            return m_trip;
+           }
+        }
+      m_trip = FUNDED_TRIP_NONE;
+      m_tripReason = "";
+      return m_trip;
+     }
+
+   //--- Risk multiplier from funded mode (post-target reduction).
+   //    1.0 = normal; below 1.0 = reduced.
+   double RiskMultiplier() const
+     {
+      if(!m_enabled || !m_targetHit) return 1.0;
+      return m_postTargetRiskMult;
+     }
+
+   //--- Should the EA suppress new entries now?
+   bool BlocksEntries() const { return m_enabled && m_trip != FUNDED_TRIP_NONE; }
+   //--- Should the EA close all positions now?
+   bool RequiresFlat() const
+     {
+      return m_enabled && (m_trip == FUNDED_TRIP_DAILY_DD ||
+                            m_trip == FUNDED_TRIP_TOTAL_DD ||
+                            m_trip == FUNDED_TRIP_WEEKEND);
+     }
+
+   string TripStr() const
+     {
+      switch(m_trip)
+        {
+         case FUNDED_TRIP_DAILY_DD:    return "DAILY DD HALT";
+         case FUNDED_TRIP_TOTAL_DD:    return "TOTAL DD HALT";
+         case FUNDED_TRIP_NEWS:        return "NEWS BLACKOUT";
+         case FUNDED_TRIP_WEEKEND:     return "WEEKEND";
+         case FUNDED_TRIP_CONSISTENCY: return "CONSISTENCY";
+         case FUNDED_TRIP_POST_TARGET: return "POST-TARGET";
+        }
+      return "OK";
+     }
+
+   //--- accessors for HUD
+   bool   Enabled()    const { return m_enabled; }
+   double DailyDdPct() const { return m_lastReportedDdPctDay; }
+   double TotalDdPct() const { return m_lastReportedDdPctTotal; }
+   double DailyHaltPct() const { return m_dailyHaltPct; }
+   double TotalHaltPct() const { return m_totalHaltPct; }
+   double TargetPct()  const { return m_targetPct; }
+   bool   TargetHit()  const { return m_targetHit; }
+   string TripReason() const { return m_tripReason; }
+   double EvalStartEquity() const { return m_evalStartEquity; }
+   double DayStartEquity()  const { return m_dayStartEquity; }
+   ENUM_OMEGA_FUNDED_FIRM Firm() const { return m_firm; }
+   string FirmStr() const
+     {
+      switch(m_firm)
+        {
+         case FUNDED_FTMO:       return "FTMO";
+         case FUNDED_THE5ERS:    return "5%ers";
+         case FUNDED_FUNDEDNEXT: return "FundedNext";
+         case FUNDED_CUSTOM:     return "Custom";
+        }
+      return "off";
+     }
+  };
+
+#endif // __OMEGA_FUNDED_MQH__
+
+//==================================================================
+//= MODULE: Memory  (Phase 9 — campaign archive · similarity · sizing)
+//= Source: Include/CampaignArchive.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Phase 9.1 — campaign serializer + archive loader                |
+//|  Phase 9.2 — similarity matcher (top-K analogues)                |
+//|  Phase 9.3 — confidence-adjustment from analogue outcomes        |
+//|                                                                  |
+//|  Per closed campaign we write a single row to                    |
+//|    MQL5/Files/OmegaMemory/<symbol>.csv                           |
+//|  with the trinity at entry, alignment components, force/regime,  |
+//|  depth reached, P&L, outcome label.                              |
+//|                                                                  |
+//|  On init we load every row of that file into a CampaignRecord    |
+//|  array. Before each new entry, the engine calls Match() to find  |
+//|  the K nearest historical analogues by fingerprint and asks      |
+//|  SizeAdjustment() for a multiplier in [0.1, 1.5].                |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CAMPAIGN_ARCHIVE_MQH__
+#define __OMEGA_CAMPAIGN_ARCHIVE_MQH__
+
+#define OMEGA_ARCHIVE_MAX 2048
+
+struct CampaignRecord
+  {
+   datetime opened;
+   datetime closed;
+   string   symbol;
+   int      direction;
+   int      tier;
+   double   lifeAtEntry;
+   double   stabAtEntry;
+   double   confAtEntry;
+   double   narrAlignAtEntry;
+   double   forceAtEntry;
+   double   regime;
+   int      depth;
+   int      adds;
+   double   pnl;
+   double   pnlPct;       // %% of equity at entry
+   string   outcome;      // WON / LOST / SCRATCH
+   long     campaignId;
+  };
+
+class CampaignArchive
+  {
+private:
+   CampaignRecord m_recs[OMEGA_ARCHIVE_MAX];
+   int            m_count;
+   string         m_folder;
+   bool           m_enabled;
+   // pending in-flight campaigns (open → close)
+   long           m_pendIds[64];
+   datetime       m_pendOpened[64];
+   double         m_pendLife[64];
+   double         m_pendStab[64];
+   double         m_pendConf[64];
+   double         m_pendNarr[64];
+   double         m_pendForce[64];
+   double         m_pendRegime[64];
+   int            m_pendTier[64];
+   int            m_pendDir[64];
+   double         m_pendEqAtEntry[64];
+   int            m_pendCount;
+
+public:
+                     CampaignArchive() { m_count = 0; m_pendCount = 0; m_enabled = false; m_folder = "OmegaMemory"; }
+
+   void Init(bool enabled, string folder)
+     {
+      m_enabled = enabled;
+      m_folder  = (StringLen(folder) > 0) ? folder : "OmegaMemory";
+      LoadAll();
+      OmegaLogger::LogInfo("ARCHIVE",
+         StringFormat("Init · enabled=%s · folder=%s · loaded %d campaigns",
+                       enabled ? "YES" : "NO", m_folder, m_count));
+     }
+
+   //--- Build a per-symbol CSV path: MQL5\Files\<folder>\<sym>.csv
+   string FilePath(string sym) const
+     {
+      return m_folder + "\\" + sym + ".csv";
+     }
+
+   void LoadAll()
+     {
+      m_count = 0;
+      string sym = _Symbol;
+      string path = FilePath(sym);
+      int h = FileOpen(path, FILE_READ|FILE_CSV|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ);
+      if(h == INVALID_HANDLE)
+        {
+         //-- try non-COMMON (per-terminal) folder
+         h = FileOpen(path, FILE_READ|FILE_CSV|FILE_ANSI|FILE_SHARE_READ);
+        }
+      if(h == INVALID_HANDLE) return;
+      // header line
+      if(!FileIsEnding(h)) FileReadString(h);
+      while(!FileIsEnding(h) && m_count < OMEGA_ARCHIVE_MAX)
+        {
+         CampaignRecord r;
+         r.opened          = (datetime)FileReadInteger(h);
+         r.closed          = (datetime)FileReadInteger(h);
+         r.symbol          = FileReadString(h);
+         r.direction       = (int)FileReadInteger(h);
+         r.tier            = (int)FileReadInteger(h);
+         r.lifeAtEntry     = FileReadNumber(h);
+         r.stabAtEntry     = FileReadNumber(h);
+         r.confAtEntry     = FileReadNumber(h);
+         r.narrAlignAtEntry= FileReadNumber(h);
+         r.forceAtEntry    = FileReadNumber(h);
+         r.regime          = FileReadNumber(h);
+         r.depth           = (int)FileReadInteger(h);
+         r.adds            = (int)FileReadInteger(h);
+         r.pnl             = FileReadNumber(h);
+         r.pnlPct          = FileReadNumber(h);
+         r.outcome         = FileReadString(h);
+         r.campaignId      = FileReadInteger(h);
+         if(r.opened > 0) { m_recs[m_count] = r; m_count++; }
+        }
+      FileClose(h);
+     }
+
+   void Append(const CampaignRecord &r)
+     {
+      string path = FilePath(_Symbol);
+      bool   exists = FileIsExist(path);
+      int h = FileOpen(path, FILE_WRITE|FILE_READ|FILE_CSV|FILE_ANSI|FILE_SHARE_READ);
+      if(h == INVALID_HANDLE) return;
+      FileSeek(h, 0, SEEK_END);
+      if(!exists)
+        {
+         FileWrite(h, "opened","closed","symbol","direction","tier",
+                   "life","stab","conf","narrAlign","force","regime",
+                   "depth","adds","pnl","pnlPct","outcome","campaignId");
+        }
+      FileWrite(h, (long)r.opened, (long)r.closed, r.symbol, r.direction, r.tier,
+                r.lifeAtEntry, r.stabAtEntry, r.confAtEntry, r.narrAlignAtEntry,
+                r.forceAtEntry, r.regime, r.depth, r.adds, r.pnl, r.pnlPct,
+                r.outcome, r.campaignId);
+      FileClose(h);
+     }
+
+   //--- Phase 9.1: events from the position manager
+   void OnCampaignOpen(long campaignId, int direction, int tier,
+                        const OmegaState &state, double forceScore, double regime,
+                        double equityAtEntry)
+     {
+      if(!m_enabled || m_pendCount >= 64) return;
+      // dedupe
+      for(int i = 0; i < m_pendCount; i++)
+         if(m_pendIds[i] == campaignId) return;
+      int s = m_pendCount;
+      m_pendIds[s]        = campaignId;
+      m_pendOpened[s]     = TimeCurrent();
+      m_pendLife[s]       = state.life;
+      m_pendStab[s]       = state.stability;
+      m_pendConf[s]       = state.confidence;
+      m_pendNarr[s]       = state.supporting.alignment;
+      m_pendForce[s]      = forceScore;
+      m_pendRegime[s]     = regime;
+      m_pendTier[s]       = tier;
+      m_pendDir[s]        = direction;
+      m_pendEqAtEntry[s]  = equityAtEntry;
+      m_pendCount++;
+     }
+
+   void OnCampaignClose(long campaignId, double pnl, int depth, int adds, string outcome)
+     {
+      if(!m_enabled) return;
+      int found = -1;
+      for(int i = 0; i < m_pendCount; i++) if(m_pendIds[i] == campaignId) { found = i; break; }
+      if(found < 0) return;
+      CampaignRecord r;
+      r.opened           = m_pendOpened[found];
+      r.closed           = TimeCurrent();
+      r.symbol           = _Symbol;
+      r.direction        = m_pendDir[found];
+      r.tier             = m_pendTier[found];
+      r.lifeAtEntry      = m_pendLife[found];
+      r.stabAtEntry      = m_pendStab[found];
+      r.confAtEntry      = m_pendConf[found];
+      r.narrAlignAtEntry = m_pendNarr[found];
+      r.forceAtEntry     = m_pendForce[found];
+      r.regime           = m_pendRegime[found];
+      r.depth            = depth;
+      r.adds             = adds;
+      r.pnl              = pnl;
+      r.pnlPct           = (m_pendEqAtEntry[found] > 0) ? (pnl / m_pendEqAtEntry[found]) * 100.0 : 0.0;
+      r.outcome          = outcome;
+      r.campaignId       = campaignId;
+      Append(r);
+      if(m_count < OMEGA_ARCHIVE_MAX) { m_recs[m_count] = r; m_count++; }
+      // shift pending array
+      for(int j = found; j < m_pendCount - 1; j++)
+        {
+         m_pendIds[j]        = m_pendIds[j+1];
+         m_pendOpened[j]     = m_pendOpened[j+1];
+         m_pendLife[j]       = m_pendLife[j+1];
+         m_pendStab[j]       = m_pendStab[j+1];
+         m_pendConf[j]       = m_pendConf[j+1];
+         m_pendNarr[j]       = m_pendNarr[j+1];
+         m_pendForce[j]      = m_pendForce[j+1];
+         m_pendRegime[j]     = m_pendRegime[j+1];
+         m_pendTier[j]       = m_pendTier[j+1];
+         m_pendDir[j]        = m_pendDir[j+1];
+         m_pendEqAtEntry[j]  = m_pendEqAtEntry[j+1];
+        }
+      m_pendCount--;
+     }
+
+   //--- Phase 9.2: similarity match. Returns top-K nearest by
+   //    fingerprint (life, stab, conf, narrAlign, force, regime).
+   //    Outputs: outIdx[], outDist[], outOutcomeWon[].
+   //    Returns: count of matches found (≤ k).
+   int Match(const OmegaState &state, double forceScore, double regime, int direction,
+             int k, int &outIdx[], double &outDist[], int &outWon[])
+     {
+      if(m_count == 0 || !m_enabled) return 0;
+      double dist[OMEGA_ARCHIVE_MAX];
+      int    idx [OMEGA_ARCHIVE_MAX];
+      int    n = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         if(m_recs[i].direction != direction) continue;
+         double d2 = 0;
+         d2 += MathPow(state.life       - m_recs[i].lifeAtEntry,      2);
+         d2 += MathPow(state.stability  - m_recs[i].stabAtEntry,      2);
+         d2 += MathPow(state.confidence - m_recs[i].confAtEntry,      2);
+         d2 += MathPow(state.supporting.alignment - m_recs[i].narrAlignAtEntry, 2);
+         d2 += MathPow(forceScore       - m_recs[i].forceAtEntry,     2) * 0.5;
+         d2 += MathPow(regime           - m_recs[i].regime,           2) * 0.5;
+         dist[n] = MathSqrt(d2);
+         idx[n]  = i;
+         n++;
+        }
+      // partial sort: top-k by smallest dist (insertion-sort style on top-k)
+      ArrayResize(outIdx,  k);
+      ArrayResize(outDist, k);
+      ArrayResize(outWon,  k);
+      int kept = 0;
+      for(int i = 0; i < n; i++)
+        {
+         int   pos = kept;
+         double d  = dist[i];
+         //-- find insertion position
+         while(pos > 0 && d < outDist[pos-1])
+           {
+            if(pos < k) { outDist[pos] = outDist[pos-1]; outIdx[pos] = outIdx[pos-1]; outWon[pos] = outWon[pos-1]; }
+            pos--;
+           }
+         if(pos < k)
+           {
+            outDist[pos] = d;
+            outIdx[pos]  = idx[i];
+            outWon[pos]  = (m_recs[idx[i]].pnl > 0) ? 1 : (m_recs[idx[i]].pnl < 0 ? 0 : -1);
+            if(kept < k) kept++;
+           }
+        }
+      return kept;
+     }
+
+   //--- Phase 9.3: convert match outcomes to a sizing multiplier.
+   //    Cold-start safe: if archive < 20 records, return 1.0 (no change).
+   //    Bounded: clamped to [0.1, 1.5] so a noisy match can't make
+   //    the engine reckless or paralysed.
+   double SizeAdjustment(const int &outWon[], int matchCount)
+     {
+      if(!m_enabled || m_count < 20 || matchCount < 3) return 1.0;
+      int wins = 0, losses = 0;
+      for(int i = 0; i < matchCount; i++)
+        {
+         if(outWon[i] == 1) wins++;
+         else if(outWon[i] == 0) losses++;
+        }
+      int decided = wins + losses;
+      if(decided == 0) return 1.0;
+      double winRate = (double)wins / (double)decided;
+      // map [0..1] win-rate to [0.1..1.5] multiplier
+      double mult = 0.1 + winRate * 1.4;
+      return MathMax(0.1, MathMin(1.5, mult));
+     }
+
+   //--- accessors
+   int   Count() const { return m_count; }
+   bool  Enabled() const { return m_enabled; }
+   int   PendingCount() const { return m_pendCount; }
+  };
+
+#endif // __OMEGA_CAMPAIGN_ARCHIVE_MQH__
+
+//==================================================================
+//= MODULE: Explain  (Phase 14 — explainability ring buffer)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Every decision (verdict, reason, snapshot) lands in a ring of   |
+//|  the last N decisions with full state context. The HUD shows the |
+//|  last 5 decisions inline so you can see what the engine did and  |
+//|  WHY at each bar.                                                |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_EXPLAIN_MQH__
+#define __OMEGA_EXPLAIN_MQH__
+
+#define OMEGA_EXPLAIN_RING 50
+
+struct ExplainEntry
+  {
+   datetime t;
+   int      decision;
+   int      reason;
+   double   life, stab, conf, narrAlign;
+   string   why;     // synthesised from current state
+   string   detail;  // raw decision detail
+  };
+
+class OmegaExplain
+  {
+private:
+   ExplainEntry m_ring[OMEGA_EXPLAIN_RING];
+   int          m_head;
+   int          m_count;
+
+public:
+                     OmegaExplain() { m_head = 0; m_count = 0; }
+
+   void Record(int decision, int reason, const OmegaState &state, string detail)
+     {
+      ExplainEntry e;
+      e.t          = TimeCurrent();
+      e.decision   = decision;
+      e.reason     = reason;
+      e.life       = state.life;
+      e.stab       = state.stability;
+      e.conf       = state.confidence;
+      e.narrAlign  = state.supporting.alignment;
+      e.detail     = detail;
+      e.why        = SynthesiseWhy(decision, state);
+      m_ring[m_head] = e;
+      m_head = (m_head + 1) % OMEGA_EXPLAIN_RING;
+      if(m_count < OMEGA_EXPLAIN_RING) m_count++;
+     }
+
+   //--- Compose a why-string explaining the decision.
+   string SynthesiseWhy(int decision, const OmegaState &state) const
+     {
+      string base = "";
+      if(decision == OMEGA_DEC_ENTER_LONG || decision == OMEGA_DEC_ENTER_SHORT)
+         base = StringFormat("life %.0f healthy + narr %.0f coherent + tier floor pass",
+                              state.life, state.supporting.alignment);
+      else if(decision == OMEGA_DEC_ADD)
+         base = StringFormat("campaign progressing · life %.0f · narr %.0f", state.life, state.supporting.alignment);
+      else if(decision == OMEGA_DEC_REVERSE)
+         base = "ownership transferred · counter-side now owns";
+      else if(decision == OMEGA_DEC_EXIT)
+         base = StringFormat("life %.0f below floor · story ended", state.life);
+      else if(decision == OMEGA_DEC_REDUCE)
+         base = StringFormat("life weakening %.0f · trim risk", state.life);
+      else if(decision == OMEGA_DEC_HOLD)
+         base = "campaign alive · no action";
+      else
+         base = StringFormat("waiting · life %.0f stab %.0f conf %.0f narr %.0f",
+                              state.life, state.stability, state.confidence, state.supporting.alignment);
+      return base;
+     }
+
+   //--- Most recent N entries (newest first). Returns count actually filled.
+   int RecentN(int wantN, ExplainEntry &out[]) const
+     {
+      int n = MathMin(wantN, m_count);
+      ArrayResize(out, n);
+      for(int i = 0; i < n; i++)
+        {
+         int idx = (m_head - 1 - i + OMEGA_EXPLAIN_RING) % OMEGA_EXPLAIN_RING;
+         out[i] = m_ring[idx];
+        }
+      return n;
+     }
+
+   int Count() const { return m_count; }
+  };
+
+#endif // __OMEGA_EXPLAIN_MQH__
+
+//==================================================================
+//= MODULE: Attention  (Phase 10 — focus engine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Attention = "what matters most right now". Scores 0..100 from   |
+//|  4 urgency signals: compression critical, parent threat near,    |
+//|  life inflection, alignment shift. Higher score = more urgent.   |
+//|  Used by HUD to highlight the curve under highest attention.    |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_ATTENTION_MQH__
+#define __OMEGA_ATTENTION_MQH__
+
+class OmegaAttention
+  {
+private:
+   double m_lastLife;
+   double m_lastNarr;
+   double m_score;
+   string m_dominant;
+
+public:
+                     OmegaAttention() { m_lastLife = 50; m_lastNarr = 50; m_score = 0; m_dominant = "—"; }
+
+   //--- Update on each closed bar.
+   void Update(const OmegaState &state, OmegaCurve &curve)
+     {
+      double s = 0;
+      string dom = "—";
+
+      //-- compression critical (compIdx high == tightening near release)
+      double comp = state.supporting.compression;
+      if(comp >= 70.0) { s += 30; if(dom == "—") dom = "compression release imminent"; }
+      else if(comp >= 50.0) s += 15;
+
+      //-- life inflection (rapid change)
+      double dLife = state.life - m_lastLife;
+      if(MathAbs(dLife) >= 8.0) { s += 25; if(dom == "—") dom = (dLife>0 ? "life rising fast" : "life falling fast"); }
+      else if(MathAbs(dLife) >= 4.0) s += 12;
+
+      //-- narrative alignment shift
+      double dNarr = state.supporting.alignment - m_lastNarr;
+      if(MathAbs(dNarr) >= 8.0) { s += 25; if(dom == "—") dom = (dNarr>0 ? "narrative re-cohering" : "narrative breaking"); }
+
+      //-- transfer probability
+      double xfer = state.supporting.pTransfer;
+      if(xfer >= 60.0) { s += 20; if(dom == "—") dom = "transfer probability spiking"; }
+
+      //-- owner near death
+      int oi = curve.tree.ownerIndex;
+      if(oi >= 0 && curve.tree.tree[oi].alive && curve.tree.tree[oi].energy < 25)
+        { s += 25; if(dom == "—") dom = "owner curve near death"; }
+
+      m_score = MathMax(0.0, MathMin(100.0, s));
+      m_dominant = dom;
+      m_lastLife = state.life;
+      m_lastNarr = state.supporting.alignment;
+     }
+
+   double Score()    const { return m_score; }
+   string Dominant() const { return m_dominant; }
+  };
+
+#endif // __OMEGA_ATTENTION_MQH__
+
+//==================================================================
+//= MODULE: Portfolio  (Phase 11 — cross-symbol awareness)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Counts open positions across ALL symbols on the broker (any     |
+//|  magic), tracks total notional exposure, and detects correlated  |
+//|  overlap (multiple positions on macro-correlated pairs). Returns |
+//|  a cap multiplier the Risk module multiplies into LotsFor.       |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_PORTFOLIO_MQH__
+#define __OMEGA_PORTFOLIO_MQH__
+
+class OmegaPortfolio
+  {
+private:
+   int    m_totalPositions;
+   double m_totalNotional;
+   int    m_correlated;
+   double m_aggLevPct;
+   double m_capMultiplier;
+   double m_maxAggLevPct;     // hard cap
+
+public:
+                     OmegaPortfolio() { Reset(); m_maxAggLevPct = 2500.0; }
+
+   void Init(double maxAggLevPct) { m_maxAggLevPct = maxAggLevPct; Reset(); }
+   void Reset() { m_totalPositions = 0; m_totalNotional = 0; m_correlated = 0; m_aggLevPct = 0; m_capMultiplier = 1.0; }
+
+   //--- Refresh counters from open broker positions.
+   void Update(double equity)
+     {
+      Reset();
+      int total = PositionsTotal();
+      string mySym = _Symbol;
+      string mySymBase = StringSubstr(mySym, 0, 3);     // crude: 'XAU' / 'EUR' / etc.
+      for(int i = 0; i < total; i++)
+        {
+         ulong tk = PositionGetTicket(i);
+         if(tk == 0) continue;
+         if(!PositionSelectByTicket(tk)) continue;
+         string sym = PositionGetString(POSITION_SYMBOL);
+         double vol = PositionGetDouble(POSITION_VOLUME);
+         double px  = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double cs  = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+         m_totalPositions++;
+         m_totalNotional += MathAbs(vol * px * cs);
+         if(StringLen(sym) >= 3 && StringSubstr(sym, 0, 3) == mySymBase && sym != mySym)
+            m_correlated++;
+        }
+      m_aggLevPct = (equity > 0) ? (m_totalNotional / equity) * 100.0 : 0.0;
+      // cap multiplier: scale down as we approach max leverage
+      if(m_maxAggLevPct > 0 && m_aggLevPct >= m_maxAggLevPct)
+         m_capMultiplier = 0.0;       // hard refuse new entries
+      else if(m_maxAggLevPct > 0 && m_aggLevPct >= m_maxAggLevPct * 0.75)
+         m_capMultiplier = 0.5;       // soft slowdown
+      else
+         m_capMultiplier = 1.0;
+      // correlation penalty
+      if(m_correlated >= 2) m_capMultiplier *= 0.5;
+     }
+
+   double CapMultiplier() const { return m_capMultiplier; }
+   int    TotalPositions() const { return m_totalPositions; }
+   double TotalNotional()  const { return m_totalNotional; }
+   double AggLeveragePct() const { return m_aggLevPct; }
+   int    Correlated()     const { return m_correlated; }
+   double MaxAggLevPct()   const { return m_maxAggLevPct; }
+  };
+
+#endif // __OMEGA_PORTFOLIO_MQH__
+
+//==================================================================
+//= MODULE: MetaChain  (Phase 12 — campaigns of campaigns)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Tracks the engine's recent campaign outcomes by symbol. Detects |
+//|  streaks (good or bad) and exposes a confidence multiplier the   |
+//|  decision engine can read.                                       |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_META_CHAIN_MQH__
+#define __OMEGA_META_CHAIN_MQH__
+
+#define OMEGA_META_RING 30
+
+class OmegaMetaChain
+  {
+private:
+   double m_pnls[OMEGA_META_RING];
+   int    m_head;
+   int    m_count;
+   double m_lastTotal;
+   int    m_streakWins;
+   int    m_streakLosses;
+
+public:
+                     OmegaMetaChain() { m_head = 0; m_count = 0; m_lastTotal = 0; m_streakWins = 0; m_streakLosses = 0; }
+
+   void OnCampaignClose(double pnl)
+     {
+      m_pnls[m_head] = pnl;
+      m_head = (m_head + 1) % OMEGA_META_RING;
+      if(m_count < OMEGA_META_RING) m_count++;
+      if(pnl > 0)
+        {
+         m_streakWins++;
+         m_streakLosses = 0;
+        }
+      else if(pnl < 0)
+        {
+         m_streakLosses++;
+         m_streakWins = 0;
+        }
+      m_lastTotal = 0;
+      for(int i = 0; i < m_count; i++) m_lastTotal += m_pnls[i];
+     }
+
+   //--- Confidence multiplier from streak. Bounded.
+   double Multiplier() const
+     {
+      if(m_streakWins   >= 5) return 1.20;   // hot streak → bump
+      if(m_streakWins   >= 3) return 1.10;
+      if(m_streakLosses >= 5) return 0.50;   // cold streak → throttle hard
+      if(m_streakLosses >= 3) return 0.75;
+      return 1.0;
+     }
+
+   double WinRate() const
+     {
+      if(m_count == 0) return 0.50;
+      int w = 0, decided = 0;
+      for(int i = 0; i < m_count; i++) { if(m_pnls[i] > 0) w++; if(m_pnls[i] != 0) decided++; }
+      return (decided > 0) ? (double)w / (double)decided : 0.50;
+     }
+
+   int    StreakWins()   const { return m_streakWins; }
+   int    StreakLosses() const { return m_streakLosses; }
+   int    Count()        const { return m_count; }
+   double TotalPnl()     const { return m_lastTotal; }
+  };
+
+#endif // __OMEGA_META_CHAIN_MQH__
+
+//==================================================================
+//= MODULE: SelfEvolution  (Phase 13 — adaptive thresholds)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Watches engine hit-rate over a rolling window. If degrading,    |
+//|  tightens the trinity floors and narrative threshold by a small  |
+//|  step. If improving, eases them. Bounded ranges so the engine    |
+//|  cannot drift off the rails. The tuned thresholds are written    |
+//|  back to DecisionParams every N closed campaigns.                |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_SELF_EVOLUTION_MQH__
+#define __OMEGA_SELF_EVOLUTION_MQH__
+
+class OmegaSelfEvolution
+  {
+private:
+   double m_baselineWinRate;
+   double m_lastWinRate;
+   int    m_rebalanceEvery;     // every N closed campaigns
+   int    m_closedSinceCheck;
+   double m_lifeFloorMin, m_lifeFloorMax;
+   double m_stabFloorMin, m_stabFloorMax;
+   double m_confFloorMin, m_confFloorMax;
+   double m_narrFloorMin, m_narrFloorMax;
+   bool   m_enabled;
+
+public:
+                     OmegaSelfEvolution()
+     {
+      m_baselineWinRate = 0.55;
+      m_lastWinRate = 0.55;
+      m_rebalanceEvery = 5;
+      m_closedSinceCheck = 0;
+      m_lifeFloorMin = 35; m_lifeFloorMax = 65;
+      m_stabFloorMin = 35; m_stabFloorMax = 65;
+      m_confFloorMin = 30; m_confFloorMax = 60;
+      m_narrFloorMin = 50; m_narrFloorMax = 80;
+      m_enabled = false;
+     }
+
+   void Init(bool enabled, double baseline, int rebalanceN)
+     {
+      m_enabled = enabled;
+      m_baselineWinRate = baseline;
+      m_rebalanceEvery = MathMax(1, rebalanceN);
+     }
+
+   //--- Called on every campaign close. Returns true if thresholds
+   //    should be re-applied this close (caller writes back to params).
+   bool OnCampaignClose(double currentWinRate, DecisionParams &p)
+     {
+      if(!m_enabled) return false;
+      m_closedSinceCheck++;
+      m_lastWinRate = currentWinRate;
+      if(m_closedSinceCheck < m_rebalanceEvery) return false;
+      m_closedSinceCheck = 0;
+
+      double delta = currentWinRate - m_baselineWinRate;
+      double step  = (MathAbs(delta) > 0.10) ? 3.0 : 1.5;   // bigger step when far off
+
+      if(delta < -0.05)
+        {
+         //-- degrading → tighten thresholds
+         p.enterMinLife       = MathMin(p.enterMinLife       + step, m_lifeFloorMax);
+         p.enterMinStability  = MathMin(p.enterMinStability  + step, m_stabFloorMax);
+         p.enterMinConf       = MathMin(p.enterMinConf       + step, m_confFloorMax);
+         p.narrAlignMin       = MathMin(p.narrAlignMin       + step, m_narrFloorMax);
+        }
+      else if(delta > 0.05)
+        {
+         //-- improving → ease thresholds (slightly)
+         p.enterMinLife       = MathMax(p.enterMinLife       - step * 0.5, m_lifeFloorMin);
+         p.enterMinStability  = MathMax(p.enterMinStability  - step * 0.5, m_stabFloorMin);
+         p.enterMinConf       = MathMax(p.enterMinConf       - step * 0.5, m_confFloorMin);
+         p.narrAlignMin       = MathMax(p.narrAlignMin       - step * 0.5, m_narrFloorMin);
+        }
+      OmegaLogger::LogInfo("EVOLUTION",
+         StringFormat("Adapt · winRate=%.2f vs baseline=%.2f · life=%.0f stab=%.0f conf=%.0f narr=%.0f",
+                       currentWinRate, m_baselineWinRate,
+                       p.enterMinLife, p.enterMinStability, p.enterMinConf, p.narrAlignMin));
+      return true;
+     }
+
+   double LastWinRate() const { return m_lastWinRate; }
+   bool   Enabled()     const { return m_enabled; }
+  };
+
+#endif // __OMEGA_SELF_EVOLUTION_MQH__//================== INPUTS ==========================================
 input group "═══ Mode (Layer: Human Override Philosophy) ═══"
 input ENUM_OMEGA_MODE     InpMode             = OMEGA_MODE_AUTONOMOUS; // Operating mode (AUTONOMOUS = trade)
 input ulong               InpMagic            = 7270001;              // Magic number
@@ -7812,6 +8809,34 @@ input double              InpSelfTrustBlend   = 0.30;                 // Self-tr
 input group "═══ Backtest / Shadow (Phase 7) ═══"
 input string              InpShadowTag        = "";                   // Shadow tag (empty=disable)
 
+input group "═══ Phase 5.2 — FTMO / Funded Account Mode ═══"
+input bool                InpFundedMode          = false;             // Master toggle for funded-account overlay
+input ENUM_OMEGA_FUNDED_FIRM InpFundedFirm       = FUNDED_FTMO;       // Firm preset (auto-fills DD / target rules)
+input double              InpFundedDailyDDPct    = 5.0;               // Custom: daily DD limit (%)
+input double              InpFundedTotalDDPct    = 10.0;              // Custom: total DD limit (%)
+input double              InpFundedTargetPct     = 10.0;              // Custom: profit target to pass eval (%)
+input double              InpFundedDailyHaltPct  = 4.0;               // Engine-halt buffer below firm daily limit
+input double              InpFundedTotalHaltPct  = 8.0;               // Engine-halt buffer below firm total limit
+input double              InpFundedPostTargetMult= 0.25;              // Risk multiplier after target hit
+input double              InpFundedDailyMaxProfit= 50.0;              // Consistency: max single-day profit % of target
+input bool                InpFundedWeekendFlat   = true;              // Auto-flat at Friday close
+input int                 InpFundedFridayCloseGmt= 21;                // Friday close hour (GMT)
+input bool                InpFundedNewsBlackout  = true;              // Pause around high-impact news
+input int                 InpFundedNewsMin       = 30;                // News blackout window (min)
+
+input group "═══ Phase 9 — Memory Replay (campaign archive) ═══"
+input bool                InpMemoryEnabled       = true;              // Write + read campaign archive on disk
+input string              InpMemoryFolder        = "OmegaMemory";     // Subfolder under MQL5/Files/
+
+input group "═══ Phase 11 — Portfolio (cross-symbol guard) ═══"
+input bool                InpPortfolioEnabled    = true;              // Cap aggregate exposure across symbols
+input double              InpPortfolioMaxAggLev  = 2500.0;             // Max aggregate notional as % of equity (25× default)
+
+input group "═══ Phase 13 — Self-Evolution (adaptive thresholds) ═══"
+input bool                InpSelfEvolutionEnabled= false;             // ENABLE adaptive threshold drift
+input double              InpEvolutionBaseline   = 0.55;              // Target win-rate (engine adapts vs this)
+input int                 InpEvolutionRebalanceN = 5;                 // Re-check every N closed campaigns
+
 //================== GLOBALS =========================================
 OmegaState        g_state;
 OmegaCapital      g_capital;
@@ -7829,6 +8854,14 @@ DecisionParams    g_dparams;     // Phase 5: decision tunables
 //-- Phase 5.5: g_chart, g_lastDecision, g_lastReason are declared at file
 //   scope right after the Chart module so class methods (e.g.
 //   CampaignPositions::Open) can reference them without forward-decl issues.
+//-- Phases 5.2 / 9 / 10..14 — globals
+OmegaFunded         g_funded;       // Phase 5.2 — FTMO funded mode
+CampaignArchive     g_archive;      // Phase 9   — campaign memory + similarity
+OmegaExplain        g_explain;      // Phase 14  — decision trace ring
+OmegaAttention      g_attention;    // Phase 10  — focus engine
+OmegaPortfolio      g_portfolio;    // Phase 11  — cross-symbol exposure
+OmegaMetaChain      g_metaChain;    // Phase 12  — campaigns of campaigns
+OmegaSelfEvolution  g_evolution;    // Phase 13  — adaptive thresholds
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 //-- Phase 5.1.1 tier-shift tracking (logs on >20% equity move OR tier change)
@@ -7941,6 +8974,23 @@ int OnInit()
    g_chart.SetEntryGates(InpEnterMinAlign);
    g_chart.SetNarrativeAlignMin(InpNarrativeAlignmentMin);
 
+   //--- Phase 5.2 — FTMO / Funded Mode overlay.
+   g_funded.Init(InpFundedMode, InpFundedFirm,
+                  InpFundedDailyDDPct, InpFundedTotalDDPct, InpFundedTargetPct,
+                  InpFundedDailyHaltPct, InpFundedTotalHaltPct,
+                  InpFundedPostTargetMult, InpFundedDailyMaxProfit,
+                  InpFundedWeekendFlat, InpFundedFridayCloseGmt,
+                  InpFundedNewsBlackout, InpFundedNewsMin);
+
+   //--- Phase 9 — Campaign memory archive.
+   g_archive.Init(InpMemoryEnabled, InpMemoryFolder);
+
+   //--- Phase 11 — Portfolio guard.
+   g_portfolio.Init(InpPortfolioMaxAggLev);
+
+   //--- Phase 13 — Self-evolution.
+   g_evolution.Init(InpSelfEvolutionEnabled, InpEvolutionBaseline, InpEvolutionRebalanceN);
+
 //--- 10. News calendar (Phase 7, optional).
    g_news.Load();
 
@@ -8019,6 +9069,23 @@ void OnTick()
 //    on the account during testing.
    g_capital.Update();
 
+//--- Phase 5.2 — FTMO funded watchdog. Returns trip state; if a
+//    rule has fired, suppress new entries (and optionally close all).
+   ENUM_OMEGA_FUNDED_TRIP fundedTrip = g_funded.Update(g_news);
+   if(g_funded.RequiresFlat() && g_positions.CountActive() > 0)
+     {
+      g_positions.CloseAll(0, REASON_HARD_LIMIT,
+                            "Funded rule trip: " + g_funded.TripReason());
+      OmegaLogger::LogWarning("FUNDED",
+         "Flat-all triggered · " + g_funded.TripReason());
+     }
+
+//--- Phase 11 — Portfolio refresh (counts open positions across all symbols).
+   g_portfolio.Update(AccountInfoDouble(ACCOUNT_EQUITY));
+
+//--- Phase 10 — Attention (cheap, every tick).
+   g_attention.Update(g_state, g_curve);
+
 //--- Phase 2: drive the multi-TF curve engine. Each CurveState
 //    consumes its own bar-close events and updates per-TF
 //    structure / physics. The curve writes the supporting fields,
@@ -8060,6 +9127,34 @@ void OnTick()
                               g_dparams);
          long campaignId = (g_curve.tree.ownerIndex >= 0)
                             ? g_curve.tree.tree[g_curve.tree.ownerIndex].id : 0;
+
+         //--- Phase 5.2 — funded mode: suppress new entries when a rule has tripped.
+         //--- Phase 11 — portfolio: also suppress when aggregate leverage hard-cap hit.
+         bool isEntry = (dr.decision == OMEGA_DEC_ENTER_LONG ||
+                          dr.decision == OMEGA_DEC_ENTER_SHORT ||
+                          dr.decision == OMEGA_DEC_ADD ||
+                          dr.decision == OMEGA_DEC_REVERSE);
+         if(isEntry)
+           {
+            if(g_funded.BlocksEntries())
+              {
+               OmegaLogger::LogWarning("FUNDED",
+                  "Entry suppressed · " + g_funded.TripStr() + " · " + g_funded.TripReason());
+               dr.decision = OMEGA_DEC_OBSERVE;
+               dr.reason   = REASON_HARD_LIMIT;
+               dr.detail   = "funded mode: " + g_funded.TripReason();
+              }
+            else if(g_portfolio.CapMultiplier() <= 0.001)
+              {
+               OmegaLogger::LogWarning("PORTFOLIO",
+                  StringFormat("Entry suppressed · aggLev %.0f%% >= cap %.0f%%",
+                                g_portfolio.AggLeveragePct(), g_portfolio.MaxAggLevPct()));
+               dr.decision = OMEGA_DEC_OBSERVE;
+               dr.reason   = REASON_HARD_LIMIT;
+               dr.detail   = "portfolio cap reached";
+              }
+           }
+
          g_meta.RecordDecision(dr.decision);
          g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
                                 dr.stopDistPoints, dr.detail,
@@ -8067,6 +9162,18 @@ void OnTick()
          //--- Phase 5.5: keep the most recent verdict for the HUD readout.
          g_lastDecision = dr.decision;
          g_lastReason   = dr.reason;
+         //--- Phase 14 — explainability: record every decision in the trace ring.
+         g_explain.Record((int)dr.decision, (int)dr.reason, g_state, dr.detail);
+         //--- Phase 9.1 — campaign archive open hook.
+         if(isEntry && campaignId > 0)
+           {
+            g_archive.OnCampaignOpen(campaignId,
+                                      dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir,
+                                      (int)g_risk.TierForCap(g_capital),
+                                      g_state, g_state.supporting.forceScore,
+                                      g_state.supporting.regime,
+                                      AccountInfoDouble(ACCOUNT_EQUITY));
+           }
          g_positions.BarUpdate(g_state, g_curve);
          g_shadow.Log(dr.decision, dr.reason, g_state.life, g_state.stability,
                        g_state.confidence, dr.detail);
@@ -8079,7 +9186,52 @@ void OnTick()
 
    //-- Phase 5.5: refresh chart visualization every tick (cheap; objects
    //   are re-positioned in place, no per-tick allocation).
-   g_chart.Update(g_state, g_curve, g_risk, g_capital, g_story, g_lastDecision, g_lastReason);
+   //-- Phase 5.5: refresh chart visualization every tick (cheap; objects
+   //   are re-positioned in place, no per-tick allocation).
+   g_chart.Update(g_state, g_curve, g_risk, g_capital, g_story,
+                   g_lastDecision, g_lastReason);
+
+   //-- Phase 5.5.4: build supplementary phases-status strings and pass
+   //   them to the chart. Done in EA scope so the chart class doesn't
+   //   need the late-declared phase types in its method signatures.
+   {
+      string fundedLine, memLine, attLine, portLine, metaLine, evolLine, exLine;
+      if(g_funded.Enabled())
+         fundedLine = StringFormat("Funded[%s] dDD %.2f%%/halt %.1f · tDD %.2f%%/halt %.1f · tgt %.1f%% %s · %s",
+                                    g_funded.FirmStr(), g_funded.DailyDdPct(), g_funded.DailyHaltPct(),
+                                    g_funded.TotalDdPct(), g_funded.TotalHaltPct(), g_funded.TargetPct(),
+                                    g_funded.TargetHit() ? "HIT" : "—", g_funded.TripStr());
+      else
+         fundedLine = "Funded: OFF";
+      memLine  = StringFormat("Memory: %d archived · %d in-flight",
+                               g_archive.Count(), g_archive.PendingCount());
+      attLine  = StringFormat("Attention: %5.1f · %s",
+                               g_attention.Score(), g_attention.Dominant());
+      portLine = StringFormat("Portfolio: %d pos · aggLev %.0f%% (cap %.0f%%) · cor %d · cap×%.2f",
+                               g_portfolio.TotalPositions(), g_portfolio.AggLeveragePct(),
+                               g_portfolio.MaxAggLevPct(), g_portfolio.Correlated(),
+                               g_portfolio.CapMultiplier());
+      metaLine = StringFormat("Meta-Chain: W%d L%d · winRate %.0f%% · mult ×%.2f",
+                               g_metaChain.StreakWins(), g_metaChain.StreakLosses(),
+                               g_metaChain.WinRate() * 100.0, g_metaChain.Multiplier());
+      evolLine = StringFormat("Evolution: %s · winRate %.0f%%",
+                               g_evolution.Enabled() ? "ON" : "off",
+                               g_evolution.LastWinRate() * 100.0);
+      ExplainEntry recent[];
+      int n = g_explain.RecentN(1, recent);
+      if(n > 0)
+        {
+         exLine = StringFormat("Last: %s · L%.0f S%.0f C%.0f N%.0f · %s",
+                                OmegaStr::DecisionToString((ENUM_OMEGA_DECISION)recent[0].decision),
+                                recent[0].life, recent[0].stab, recent[0].conf, recent[0].narrAlign,
+                                recent[0].why);
+         if(StringLen(exLine) > 75) exLine = StringSubstr(exLine, 0, 74);
+        }
+      else
+         exLine = "Last: (no decisions yet)";
+      g_chart.UpdatePhasesPanel(fundedLine, memLine, attLine, portLine,
+                                 metaLine, evolLine, exLine);
+   }
   }
 
 //+------------------------------------------------------------------+
