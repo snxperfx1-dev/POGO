@@ -147,12 +147,26 @@ public:
          OmegaLogger::LogException("POSITIONS", -1, "Open: dependencies not wired");
          return 0;
         }
-      double riskPct = m_risk.RiskPctFor(state);
+      //--- Phase 5.1: tier-aware sizing path with stop floor + margin precheck.
+      double equity   = m_capital.Equity();
+      ENUM_OMEGA_TIER tier = m_risk.TierFor(equity);
+      double riskPct  = m_risk.RiskPctFor(state, tier);
+      if(riskPct <= 0.0)
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · skipped · tier=%s · life=%.0f stab=%.0f conf=%.0f below tier conviction floor",
+                          m_symbol, m_risk.TierStr(tier),
+                          state.life, state.stability, state.confidence));
+         return 0;
+        }
+      double rawStop = stopDistPoints;
+      stopDistPoints = m_risk.ResolveStopPoints(m_symbol, stopDistPoints);
       double lots    = m_risk.LotsFor(m_symbol, riskPct, stopDistPoints, m_capital);
       if(lots <= 0)
         {
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · zero lots · risk=%.2f%% sd=%.0f", m_symbol, riskPct, stopDistPoints));
+            StringFormat("%s · zero lots · tier=%s risk=%.2f%% sd=%.0f (raw %.0f)",
+                          m_symbol, m_risk.TierStr(tier), riskPct, stopDistPoints, rawStop));
          return 0;
         }
 
@@ -162,6 +176,14 @@ public:
       double openPx = (direction == 1) ? askPx : bidPx;
       double slDist = stopDistPoints * point;
       double sl     = (direction == 1) ? (openPx - slDist) : (openPx + slDist);
+
+      if(!m_risk.PassesMarginCheck(m_symbol, direction, lots, openPx))
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · skipped · margin precheck failed · lots=%.2f openPx=%.5f",
+                          m_symbol, lots, openPx));
+         return 0;
+        }
 
       ulong tk = (direction == 1)
          ? m_trade.Buy(m_symbol, lots, sl, 0.0, reason, detail)
@@ -195,9 +217,9 @@ public:
       m_pos[slot].currentSL      = sl;
       m_pos[slot].opened         = TimeCurrent();
       OmegaLogger::LogInfo("POSITIONS",
-         StringFormat("OPEN · %s · risk=%.2f%% · %s",
-                       PositionRoleStr::ToString(role), riskPct,
-                       m_pos[slot].Snapshot()));
+         StringFormat("OPEN · %s · tier=%s risk=%.2f%% lots=%.2f sd=%.0f · %s",
+                       PositionRoleStr::ToString(role), m_risk.TierStr(tier),
+                       riskPct, lots, stopDistPoints, m_pos[slot].Snapshot()));
       return tk;
      }
 

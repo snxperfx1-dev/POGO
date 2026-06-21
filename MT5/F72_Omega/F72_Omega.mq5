@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase1"
+#define OMEGA_VERSION                "1.0.0-phase5.1"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -1174,6 +1174,18 @@ public:
 #define __OMEGA_RISK_MQH__
 
 
+//=== Phase 5.1 — Equity tier classification ========================
+//   Same engine, same intelligence, different operating envelope per
+//   account size. MICRO mode is opt-in (forced over-risk acknowledged).
+enum ENUM_OMEGA_TIER
+  {
+   TIER_MICRO         = 0,   // <$200 — broker min dominates, A+ only
+   TIER_SMALL         = 1,   // $200..$1K — ALIVE-tier only, light pyramid
+   TIER_STANDARD      = 2,   // $1K..$50K — production
+   TIER_LARGE         = 3,   // $50K..$500K — production + notional caps
+   TIER_INSTITUTIONAL = 4    // >$500K — bounded by aggregate leverage
+  };
+
 class OmegaRisk
   {
 private:
@@ -1183,6 +1195,17 @@ private:
    double m_exceptional;
    double m_hardCeiling;
 
+   // Phase 5.1 — guard parameters
+   double m_minStopAtrMult;
+   int    m_minStopAtrPeriod;
+   double m_maxNotionalPct;     // per-ticket notional ≤ N% of equity
+   double m_microThreshold;     // < this → MICRO
+   double m_smallThreshold;     // < this → SMALL
+   double m_largeThreshold;     // < this → STANDARD; ≥ this → LARGE
+   double m_instThreshold;      // ≥ this → INSTITUTIONAL
+   bool   m_allowMicro;         // explicit consent to MICRO over-risk
+   double m_marginUseMaxPct;    // pre-trade: margin ≤ N% of free margin
+
 public:
                      OmegaRisk()
      {
@@ -1191,6 +1214,16 @@ public:
       m_strong      = 1.00;
       m_exceptional = 2.00;
       m_hardCeiling = 2.00;
+      // Phase 5.1 defaults — production-safe
+      m_minStopAtrMult    = 0.75;
+      m_minStopAtrPeriod  = 14;
+      m_maxNotionalPct    = 1000.0;  // 10× equity per ticket
+      m_microThreshold    = 200.0;
+      m_smallThreshold    = 1000.0;
+      m_largeThreshold    = 50000.0;
+      m_instThreshold     = 500000.0;
+      m_allowMicro        = false;
+      m_marginUseMaxPct   = 80.0;
      }
 
    void Init(double basePct, double normalPct, double strongPct, double excepPct, double ceilingPct = 2.0)
@@ -1205,23 +1238,107 @@ public:
                       basePct, normalPct, strongPct, excepPct, ceilingPct));
      }
 
-   //--- Conviction tier from the trinity. Conservative by design;
-   //    Phase 6 SelfObservation tunes these against campaign memory.
-   double RiskPctFor(const OmegaState &s) const
+   //--- Phase 5.1 — install equity guards (called from EA OnInit after Init).
+   void InitGuards(double minStopAtrMult, int minStopAtrPeriod,
+                   double maxNotionalPct, double microThr, double smallThr,
+                   double largeThr, double instThr, bool allowMicro,
+                   double marginUseMaxPct)
      {
-      if(!s.primed)
-         return m_base;
-      if(s.life >= 75 && s.stability >= 75 && s.confidence >= 70)
-         return m_exceptional;
-      if(s.life >= 60 && s.stability >= 60 && s.confidence >= 55)
-         return m_strong;
-      if(s.life >= 45 && s.stability >= 45 && s.confidence >= 40)
-         return m_normal;
+      m_minStopAtrMult    = minStopAtrMult;
+      m_minStopAtrPeriod  = minStopAtrPeriod;
+      m_maxNotionalPct    = maxNotionalPct;
+      m_microThreshold    = microThr;
+      m_smallThreshold    = smallThr;
+      m_largeThreshold    = largeThr;
+      m_instThreshold     = instThr;
+      m_allowMicro        = allowMicro;
+      m_marginUseMaxPct   = marginUseMaxPct;
+      OmegaLogger::LogInfo("RISK",
+         StringFormat("Guards · stopFloor=%.2f×ATR(%d) · notionalCap=%.0f%% equity · tiers MICRO<%.0f SMALL<%.0f LARGE<%.0f INST≥%.0f · allowMicro=%s · marginUseMax=%.0f%%",
+                      minStopAtrMult, minStopAtrPeriod, maxNotionalPct,
+                      microThr, smallThr, largeThr, instThr,
+                      allowMicro ? "YES" : "NO", marginUseMaxPct));
+     }
+
+   //--- Tier resolution (live equity → tier).
+   ENUM_OMEGA_TIER TierFor(double equity) const
+     {
+      if(equity < m_microThreshold)  return TIER_MICRO;
+      if(equity < m_smallThreshold)  return TIER_SMALL;
+      if(equity < m_largeThreshold)  return TIER_STANDARD;
+      if(equity < m_instThreshold)   return TIER_LARGE;
+      return TIER_INSTITUTIONAL;
+     }
+
+   string TierStr(ENUM_OMEGA_TIER t) const
+     {
+      switch(t)
+        {
+         case TIER_MICRO:         return "MICRO";
+         case TIER_SMALL:         return "SMALL";
+         case TIER_STANDARD:      return "STANDARD";
+         case TIER_LARGE:         return "LARGE";
+         case TIER_INSTITUTIONAL: return "INSTITUTIONAL";
+        }
+      return "?";
+     }
+
+   //--- Tier-aware conviction tier from the trinity.
+   //    MICRO  → only A+ setups (life≥75, stab≥75, conf≥70). Returns 0 to skip otherwise.
+   //    SMALL  → ALIVE-tier minimum (life≥60). Returns 0 to skip below that.
+   //    STD+   → full ladder.
+   double RiskPctFor(const OmegaState &s, ENUM_OMEGA_TIER tier) const
+     {
+      if(!s.primed) return m_base;
+      bool aPlus  = (s.life >= 75 && s.stability >= 75 && s.confidence >= 70);
+      bool strong = (s.life >= 60 && s.stability >= 60 && s.confidence >= 55);
+      bool normal = (s.life >= 45 && s.stability >= 45 && s.confidence >= 40);
+      if(tier == TIER_MICRO)
+        {
+         if(!m_allowMicro)   return 0.0;
+         return aPlus ? m_exceptional : 0.0;
+        }
+      if(tier == TIER_SMALL)
+        {
+         if(aPlus)           return m_exceptional;
+         if(strong)          return m_strong;
+         return 0.0;
+        }
+      // STANDARD / LARGE / INSTITUTIONAL — full ladder
+      if(aPlus)              return m_exceptional;
+      if(strong)             return m_strong;
+      if(normal)             return m_normal;
       return m_base;
      }
 
+   //--- Backwards-compatible legacy entrypoint (no tier).
+   double RiskPctFor(const OmegaState &s) const
+     {
+      return RiskPctFor(s, TIER_STANDARD);
+     }
+
+   //--- Phase 5.1 — apply ATR floor to a raw stop distance (in points).
+   //    Caller must use the RETURNED value for both sizing AND the SL line.
+   double ResolveStopPoints(string symbol, double rawStopDistPoints) const
+     {
+      if(m_minStopAtrMult <= 0.0 || m_minStopAtrPeriod <= 0) return rawStopDistPoints;
+      int handle = iATR(symbol, _Period, m_minStopAtrPeriod);
+      if(handle == INVALID_HANDLE) return rawStopDistPoints;
+      double buf[];
+      ArraySetAsSeries(buf, true);
+      int copied = CopyBuffer(handle, 0, 0, 1, buf);
+      IndicatorRelease(handle);
+      if(copied <= 0 || buf[0] <= 0) return rawStopDistPoints;
+      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      if(point <= 0) return rawStopDistPoints;
+      double atrPts   = buf[0] / point;
+      double floorPts = atrPts * m_minStopAtrMult;
+      return MathMax(rawStopDistPoints, floorPts);
+     }
+
    //--- Convert risk% + stop distance to broker-normalized lots.
-   //    Returns 0 lots if any input is invalid (which suppresses entry).
+   //    Phase 5.1: applies notional cap, broker bounds, step rounding.
+   //    Returns 0 lots if any input is invalid (suppresses entry).
    double LotsFor(string symbol, double riskPct, double stopDistPoints, const OmegaCapital &cap) const
      {
       riskPct = OmegaMath::Clamp(riskPct, 0.0, m_hardCeiling);
@@ -1242,6 +1359,25 @@ public:
 
       double lots = riskMoney / lossPerLot;
 
+      //--- Phase 5.1: notional cap (per-ticket lots ≤ N% of equity ÷ contract value).
+      if(m_maxNotionalPct > 0.0)
+        {
+         double contract = SymbolInfoDouble(symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+         double askPx    = SymbolInfoDouble(symbol, SYMBOL_ASK);
+         if(askPx <= 0) askPx = SymbolInfoDouble(symbol, SYMBOL_BID);
+         if(contract > 0 && askPx > 0)
+           {
+            double notionalCap = (equity * m_maxNotionalPct / 100.0) / (askPx * contract);
+            if(notionalCap > 0 && lots > notionalCap)
+              {
+               OmegaLogger::LogInfo("RISK",
+                  StringFormat("%s · notional cap engaged · lots %.2f→%.2f (≤%.0f%% equity)",
+                               symbol, lots, notionalCap, m_maxNotionalPct));
+               lots = notionalCap;
+              }
+           }
+        }
+
       double minLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
       double maxLot  = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
       double stepLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
@@ -1251,12 +1387,31 @@ public:
       return lots;
      }
 
+   //--- Phase 5.1 — pre-trade margin precheck. Returns true if free
+   //    margin can absorb the position at the configured ceiling.
+   bool PassesMarginCheck(string symbol, int direction, double lots, double openPx) const
+     {
+      if(lots <= 0 || m_marginUseMaxPct <= 0.0) return true;
+      double margin = 0.0;
+      ENUM_ORDER_TYPE ot = (direction == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      if(!OrderCalcMargin(ot, symbol, lots, openPx, margin)) return true;  // can't check → proceed
+      double freeMargin = AccountInfoDouble(ACCOUNT_FREEMARGIN);
+      if(freeMargin <= 0) return false;
+      bool ok = (margin <= freeMargin * (m_marginUseMaxPct / 100.0));
+      if(!ok)
+         OmegaLogger::LogWarning("RISK",
+            StringFormat("%s · margin precheck FAIL · req=%.2f freeMargin=%.2f cap=%.0f%%",
+                          symbol, margin, freeMargin, m_marginUseMaxPct));
+      return ok;
+     }
+
    //--- accessors
    double Base()        const { return m_base; }
    double Normal()      const { return m_normal; }
    double Strong()      const { return m_strong; }
    double Exceptional() const { return m_exceptional; }
    double HardCeiling() const { return m_hardCeiling; }
+   bool   AllowMicro()  const { return m_allowMicro; }
   };
 
 #endif // __OMEGA_RISK_MQH__
@@ -4967,12 +5122,27 @@ public:
          OmegaLogger::LogException("POSITIONS", -1, "Open: dependencies not wired");
          return 0;
         }
-      double riskPct = m_risk.RiskPctFor(state);
+      //--- Phase 5.1: tier-aware sizing path with stop floor + margin precheck.
+      double equity   = m_capital.Equity();
+      ENUM_OMEGA_TIER tier = m_risk.TierFor(equity);
+      double riskPct  = m_risk.RiskPctFor(state, tier);
+      if(riskPct <= 0.0)
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · skipped · tier=%s · life=%.0f stab=%.0f conf=%.0f below tier conviction floor",
+                          m_symbol, m_risk.TierStr(tier),
+                          state.life, state.stability, state.confidence));
+         return 0;
+        }
+      //--- Apply ATR floor to the stop BEFORE sizing & SL placement.
+      double rawStop = stopDistPoints;
+      stopDistPoints = m_risk.ResolveStopPoints(m_symbol, stopDistPoints);
       double lots    = m_risk.LotsFor(m_symbol, riskPct, stopDistPoints, m_capital);
       if(lots <= 0)
         {
          OmegaLogger::LogWarning("POSITIONS",
-            StringFormat("%s · zero lots · risk=%.2f%% sd=%.0f", m_symbol, riskPct, stopDistPoints));
+            StringFormat("%s · zero lots · tier=%s risk=%.2f%% sd=%.0f (raw %.0f)",
+                          m_symbol, m_risk.TierStr(tier), riskPct, stopDistPoints, rawStop));
          return 0;
         }
 
@@ -4982,6 +5152,15 @@ public:
       double openPx = (direction == 1) ? askPx : bidPx;
       double slDist = stopDistPoints * point;
       double sl     = (direction == 1) ? (openPx - slDist) : (openPx + slDist);
+
+      //--- Phase 5.1: pre-trade margin precheck.
+      if(!m_risk.PassesMarginCheck(m_symbol, direction, lots, openPx))
+        {
+         OmegaLogger::LogWarning("POSITIONS",
+            StringFormat("%s · skipped · margin precheck failed · lots=%.2f openPx=%.5f",
+                          m_symbol, lots, openPx));
+         return 0;
+        }
 
       ulong tk = (direction == 1)
          ? m_trade.Buy(m_symbol, lots, sl, 0.0, reason, detail)
@@ -5015,9 +5194,9 @@ public:
       m_pos[slot].currentSL      = sl;
       m_pos[slot].opened         = TimeCurrent();
       OmegaLogger::LogInfo("POSITIONS",
-         StringFormat("OPEN · %s · risk=%.2f%% · %s",
-                       PositionRoleStr::ToString(role), riskPct,
-                       m_pos[slot].Snapshot()));
+         StringFormat("OPEN · %s · tier=%s risk=%.2f%% lots=%.2f sd=%.0f · %s",
+                       PositionRoleStr::ToString(role), m_risk.TierStr(tier),
+                       riskPct, lots, stopDistPoints, m_pos[slot].Snapshot()));
       return tk;
      }
 
@@ -6468,6 +6647,17 @@ input double              InpStrongRiskPct    = 1.00;                 // Strong 
 input double              InpExcepRiskPct     = 2.00;                 // Exceptional alignment (%)
 input double              InpHardCeilingPct   = 2.00;                 // Per-trade hard ceiling (%)
 
+input group "═══ Phase 5.1 — Equity-Tier Guards (universal sizing) ═══"
+input double              InpMinStopAtrMult   = 0.75;                 // Stop-distance floor as ATR× (anti-runaway)
+input int                 InpMinStopAtrPeriod = 14;                   // ATR period for stop floor
+input double              InpMaxNotionalPct   = 1000.0;               // Per-ticket notional ≤ N% of equity (10× default)
+input double              InpMicroTierEquity  = 200.0;                // < this USD → MICRO tier (A+ only)
+input double              InpSmallTierEquity  = 1000.0;               // < this USD → SMALL tier (ALIVE+ only)
+input double              InpLargeTierEquity  = 50000.0;              // ≥ this USD → LARGE tier (notional caps bite)
+input double              InpInstTierEquity   = 500000.0;             // ≥ this USD → INSTITUTIONAL tier
+input bool                InpAllowMicroTier   = false;                // EXPLICIT consent: trade <$200 accounts (forced over-risk)
+input double              InpMarginUseMaxPct  = 80.0;                 // Pre-trade margin precheck: req ≤ N% free margin
+
 input group "═══ Capital — drawdown circuit breakers ═══"
 input double              InpDailyLossLimit   = 3.0;                  // Daily loss limit (%)
 input double              InpWeeklyLossLimit  = 8.0;                  // Weekly loss limit (%)
@@ -6548,6 +6738,19 @@ int OnInit()
 //--- 4. Risk
    g_risk.Init(InpBaseRiskPct, InpNormalRiskPct, InpStrongRiskPct,
                 InpExcepRiskPct, InpHardCeilingPct);
+   //--- 4.1 Phase 5.1 — install equity-tier guards.
+   g_risk.InitGuards(InpMinStopAtrMult, InpMinStopAtrPeriod, InpMaxNotionalPct,
+                     InpMicroTierEquity, InpSmallTierEquity,
+                     InpLargeTierEquity, InpInstTierEquity,
+                     InpAllowMicroTier, InpMarginUseMaxPct);
+   {
+      double _eqNow = AccountInfoDouble(ACCOUNT_EQUITY);
+      ENUM_OMEGA_TIER _tNow = g_risk.TierFor(_eqNow);
+      OmegaLogger::LogInfo("EA",
+         StringFormat("Equity tier on init: %s @ %.2f %s",
+                       g_risk.TierStr(_tNow), _eqNow,
+                       AccountInfoString(ACCOUNT_CURRENCY)));
+   }
 
 //--- 5. Campaign memory
    g_db.Init();
