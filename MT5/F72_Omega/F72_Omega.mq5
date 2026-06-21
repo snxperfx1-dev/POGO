@@ -1,19 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
-//|                                                                  |
 //|       *** SINGLE-FILE BUNDLE — Phases 1..8.5 ***                 |
-//|         AGGRESSIVE DEFAULTS — fires orders out of the box        |
-//|                                                                  |
-//|   "Is the story still alive?"                                    |
 //+------------------------------------------------------------------+
 #property copyright "F72 OMEGA"
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
 #property description "Default mode AUTONOMOUS. Aggressive thresholds."
-#property description "Trinity LIVE. Engine trades."
-
 #include <Trade/Trade.mqh>
 
 
@@ -3561,16 +3555,14 @@ private:
       int reacts   = 0;
       int violates = 0;
       double scoreSum = 0.0;
-      ParticipantZone* zs[3]; zs[0] = GetPointer(m_fib618);
-                              zs[1] = GetPointer(m_fib70);
-                              zs[2] = GetPointer(m_fib786);
-      for(int i = 0; i < 3; i++)
-        {
-         touches  += zs[i].touchCount;
-         reacts   += zs[i].reactionCount;
-         violates += zs[i].violationCount;
-         if(zs[i].active) { active++; scoreSum += zs[i].DefenceScore(); }
-        }
+      //-- accumulate from all three zones (no pointers — MQL5 forbids
+      //   pointers to struct types).
+      touches  += m_fib618.touchCount    + m_fib70.touchCount    + m_fib786.touchCount;
+      reacts   += m_fib618.reactionCount + m_fib70.reactionCount + m_fib786.reactionCount;
+      violates += m_fib618.violationCount+ m_fib70.violationCount+ m_fib786.violationCount;
+      if(m_fib618.active) { active++; scoreSum += m_fib618.DefenceScore(); }
+      if(m_fib70 .active) { active++; scoreSum += m_fib70 .DefenceScore(); }
+      if(m_fib786.active) { active++; scoreSum += m_fib786.DefenceScore(); }
       m_stability    = (active > 0) ? (scoreSum / active) : OMEGA_TRINITY_NEUTRAL;
       m_reactionRate = (touches > 0) ? ((double)reacts / touches) : 0.0;
 
@@ -6442,7 +6434,7 @@ public:
 #endif // __OMEGA_BACKTEST_OPTIMIZATION_MQH__
 
 //==================================================================
-//= MAIN EA BODY (inputs · globals · OnInit/Tick/Timer/Deinit/Tester)
+//= MAIN EA BODY
 //= Source: EA.mq5
 //==================================================================
 //+------------------------------------------------------------------+

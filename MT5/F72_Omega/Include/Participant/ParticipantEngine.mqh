@@ -88,16 +88,14 @@ private:
       int reacts   = 0;
       int violates = 0;
       double scoreSum = 0.0;
-      ParticipantZone* zs[3]; zs[0] = GetPointer(m_fib618);
-                              zs[1] = GetPointer(m_fib70);
-                              zs[2] = GetPointer(m_fib786);
-      for(int i = 0; i < 3; i++)
-        {
-         touches  += zs[i].touchCount;
-         reacts   += zs[i].reactionCount;
-         violates += zs[i].violationCount;
-         if(zs[i].active) { active++; scoreSum += zs[i].DefenceScore(); }
-        }
+      //-- accumulate from all three zones (no pointers — MQL5 forbids
+      //   pointers to struct types).
+      touches  += m_fib618.touchCount    + m_fib70.touchCount    + m_fib786.touchCount;
+      reacts   += m_fib618.reactionCount + m_fib70.reactionCount + m_fib786.reactionCount;
+      violates += m_fib618.violationCount+ m_fib70.violationCount+ m_fib786.violationCount;
+      if(m_fib618.active) { active++; scoreSum += m_fib618.DefenceScore(); }
+      if(m_fib70 .active) { active++; scoreSum += m_fib70 .DefenceScore(); }
+      if(m_fib786.active) { active++; scoreSum += m_fib786.DefenceScore(); }
       m_stability    = (active > 0) ? (scoreSum / active) : OMEGA_TRINITY_NEUTRAL;
       m_reactionRate = (touches > 0) ? ((double)reacts / touches) : 0.0;
 
