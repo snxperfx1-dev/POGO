@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
-//|       *** SINGLE-FILE BUNDLE — Phases 1..8.5 ***                 |
+//|       *** AUTONOMOUS-ONLY · TRADES IMMEDIATELY ***               |
 //+------------------------------------------------------------------+
 #property copyright "F72 OMEGA"
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Default mode AUTONOMOUS. Aggressive thresholds."
+#property description "AUTONOMOUS only. Force-fallback entry until perception primes."
 #include <Trade/Trade.mqh>
 
 
@@ -29,19 +29,12 @@
 
 
 //=== Operating modes (Layer: Human Override Philosophy) =============
-//   OBSERVER   — engine perceives, no orders, only scores logged
-//   COPILOT    — engine suggests, human approves (Phase 5+)
-//   AUTONOMOUS — engine controls fully
-//   PAPER      — decisions logged, no orders sent (back-test friendly)
-//   SHADOW     — engine runs in parallel to live trading, compares
+//   Only AUTONOMOUS exists now — the engine trades. Earlier modes
+//   (OBSERVER, COPILOT, PAPER, SHADOW) were removed by request.
 //===================================================================
 enum ENUM_OMEGA_MODE
   {
-   OMEGA_MODE_OBSERVER     = 0,
-   OMEGA_MODE_COPILOT      = 1,
-   OMEGA_MODE_AUTONOMOUS   = 2,
-   OMEGA_MODE_PAPER        = 3,
-   OMEGA_MODE_SHADOW       = 4
+   OMEGA_MODE_AUTONOMOUS   = 0
   };
 
 //=== Decisions =====================================================
@@ -162,15 +155,8 @@ class OmegaStr
 public:
    static string ModeToString(ENUM_OMEGA_MODE m)
      {
-      switch(m)
-        {
-         case OMEGA_MODE_OBSERVER:    return "OBSERVER";
-         case OMEGA_MODE_COPILOT:     return "COPILOT";
-         case OMEGA_MODE_AUTONOMOUS:  return "AUTONOMOUS";
-         case OMEGA_MODE_PAPER:       return "PAPER";
-         case OMEGA_MODE_SHADOW:      return "SHADOW";
-        }
-      return "UNKNOWN";
+      if(m == OMEGA_MODE_AUTONOMOUS) return "AUTONOMOUS";
+      return "AUTONOMOUS";
      }
    static string DecisionToString(ENUM_OMEGA_DECISION d)
      {
@@ -5315,21 +5301,37 @@ public:
      {
       DecisionResult r;
 
-      //--- 1. Phase / readiness gates
-      if(!state.primed)
-        {
-         r.decision = OMEGA_DEC_OBSERVE;
-         r.reason   = REASON_PHASE_NOT_BUILT;
-         r.detail   = "engine not perceiving yet";
-         return r;
-        }
-
       int ownerDir = curve.tree.ownerDir;
-      if(ownerDir == 0)
+      r.suggestedDirection = (ownerDir != 0) ? ownerDir : 0;
+
+      //=== FORCE-TRADE FALLBACK ====================================
+      //   If perception hasn't primed yet OR no curve owner exists,
+      //   fall back to a simple bar-bias entry so the engine still
+      //   trades. Compares close[1] vs close[5] on the current chart;
+      //   non-zero diff -> direction. Once perception primes, the
+      //   normal verdict ladder below takes over.
+      if(!state.primed || ownerDir == 0)
         {
+         double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
+         double close5 = iClose(_Symbol, PERIOD_CURRENT, 5);
+         if(close1 > 0 && close5 > 0 && activeSameDirCount + activeCounterCount == 0)
+           {
+            int bias = (close1 > close5) ? 1 : (close1 < close5 ? -1 : 0);
+            if(bias != 0)
+              {
+               r.decision           = (bias == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
+               r.suggestedDirection = bias;
+               r.suggestedRole      = POS_ORIGIN;
+               r.reason             = REASON_HEARTBEAT;
+               r.detail             = StringFormat("force-fallback · primed=%s ownerDir=%d bias=%d",
+                                                   state.primed ? "Y" : "N", ownerDir, bias);
+               return r;
+              }
+           }
+         //-- already in a position OR no bias yet — observe
          r.decision = OMEGA_DEC_OBSERVE;
-         r.reason   = REASON_OWNERSHIP_LEAKING;
-         r.detail   = "no dominant curve owner";
+         r.reason   = state.primed ? REASON_OWNERSHIP_LEAKING : REASON_PHASE_NOT_BUILT;
+         r.detail   = "fallback path · waiting for bias or holding existing position";
          return r;
         }
 

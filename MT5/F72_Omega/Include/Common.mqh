@@ -14,19 +14,12 @@
 #property strict
 
 //=== Operating modes (Layer: Human Override Philosophy) =============
-//   OBSERVER   — engine perceives, no orders, only scores logged
-//   COPILOT    — engine suggests, human approves (Phase 5+)
-//   AUTONOMOUS — engine controls fully
-//   PAPER      — decisions logged, no orders sent (back-test friendly)
-//   SHADOW     — engine runs in parallel to live trading, compares
+//   Only AUTONOMOUS exists now — the engine trades. Earlier modes
+//   (OBSERVER, COPILOT, PAPER, SHADOW) were removed by request.
 //===================================================================
 enum ENUM_OMEGA_MODE
   {
-   OMEGA_MODE_OBSERVER     = 0,
-   OMEGA_MODE_COPILOT      = 1,
-   OMEGA_MODE_AUTONOMOUS   = 2,
-   OMEGA_MODE_PAPER        = 3,
-   OMEGA_MODE_SHADOW       = 4
+   OMEGA_MODE_AUTONOMOUS   = 0
   };
 
 //=== Decisions =====================================================
@@ -147,15 +140,8 @@ class OmegaStr
 public:
    static string ModeToString(ENUM_OMEGA_MODE m)
      {
-      switch(m)
-        {
-         case OMEGA_MODE_OBSERVER:    return "OBSERVER";
-         case OMEGA_MODE_COPILOT:     return "COPILOT";
-         case OMEGA_MODE_AUTONOMOUS:  return "AUTONOMOUS";
-         case OMEGA_MODE_PAPER:       return "PAPER";
-         case OMEGA_MODE_SHADOW:      return "SHADOW";
-        }
-      return "UNKNOWN";
+      if(m == OMEGA_MODE_AUTONOMOUS) return "AUTONOMOUS";
+      return "AUTONOMOUS";
      }
    static string DecisionToString(ENUM_OMEGA_DECISION d)
      {
