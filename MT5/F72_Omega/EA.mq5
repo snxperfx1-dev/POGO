@@ -35,6 +35,7 @@
 #include "Include/Session.mqh"
 #include "Include/News.mqh"
 #include "Include/Curve/Curve.mqh"
+#include "Include/Participant/Participants.mqh"
 #include "Include/Narrative/Story.mqh"
 #include "Include/Meta/Meta.mqh"
 #include "Include/Backtest/Replay.mqh"
@@ -89,6 +90,7 @@ CampaignDB        g_db;
 CampaignPositions g_positions;   // Phase 5: campaign-aware position manager
 OmegaExecution    g_exec;
 OmegaCurve        g_curve;       // Phase 2: multi-TF perception
+OmegaParticipants g_part;        // Phase 8: Fib zones + FU/flip engine
 OmegaStory        g_story;       // Phase 4: narrative engine
 OmegaMeta         g_meta;        // Phase 6: probability + self-observation + regime
 OmegaNewsCalendar g_news;        // Phase 7: optional CSV calendar
@@ -142,6 +144,9 @@ int OnInit()
 
 //--- 8. Narrative (Phase 4): LifeScore + NarrativeTracker + ConfidenceTracker.
    g_story.Init(_Symbol);
+
+//--- 8b. Participants (Phase 8): Fib zones + FU/flip engine.
+   g_part.Init(_Symbol);
 
 //--- 9. Meta (Phase 6): SelfObservation + Probability cloud + Regime.
    g_meta.Init(InpSelfTrustBlend);
@@ -206,6 +211,12 @@ void OnTick()
      {
       g_curve.DeriveSupporting(g_state.supporting);
       g_state.primed = g_curve.primed;
+
+      //--- Phase 8: participants + flip engines run after curve+tree,
+      //    before narrative — they expose participantStability /
+      //    flipQuality which the narrative then folds into stability.
+      g_part.Update(g_curve, g_state);
+
       //--- Phase 4: narrative reads curve+tree and writes life/stability/
       //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
       bool storyAdvanced = g_story.Update(g_state, g_curve);
@@ -259,7 +270,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s] · %s",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s] · %s · %s",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -272,7 +283,8 @@ void OnTimer()
          g_curve.Snapshot(),
          g_story.Snapshot(),
          g_positions.Snapshot(),
-         g_meta.Snapshot()));
+         g_meta.Snapshot(),
+         g_part.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

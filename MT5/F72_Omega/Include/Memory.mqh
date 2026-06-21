@@ -46,6 +46,9 @@ struct OmegaSupporting
    //--- narrative (Phase 4)
    double  alignment;
    double  narrative;
+   //--- participants (Phase 8)
+   double  participantStability;
+   double  flipQuality;
    //--- regime / probabilities (Phase 6)
    double  regime;
    double  pContinuation;
