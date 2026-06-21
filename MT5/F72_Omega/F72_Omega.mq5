@@ -6184,9 +6184,58 @@ bool f60_substrate_update()
   {
    if(!f_updateStructure()) return false;   // physics + f_se 14-phase + Engine 1A authority
    f_networkUpdate();                       // authentic Invisible Network registry
+   f60_updateObservation();                 // #7 FCE/observation bridge -> ERF
+   f60_updateAttack();                      // #15 Attack Sequence -> TE
    return true;
   }
 
+
+
+//==================================================================
+//= MODULE: F60Substrate.Observation  (#7 FCE / Physics Observation)
+//   The bridge physics -> higher intelligence. obs_* scores feed
+//   ERF (residual/unresolved energy). Derived purely from the
+//   already-authentic f_phys chart-wave physics. Namespaced f60_*.
+//==================================================================
+double f60_velocityScore=0, f60_accelerationScore=0, f60_convexityScore=0;
+double f60_obs_Expansion=0, f60_obs_Decay=0, f60_obs_Curvature=0, f60_obs_Absorption=0, f60_obs_Liquidity=0;
+
+void f60_updateObservation()
+  {
+   double atr = g_atr;
+   f60_velocityScore     = MathMin(MathAbs(g_vel) / MathMax(atr * 0.1, 1e-10) * 50.0, 100.0);
+   f60_accelerationScore = MathMin(MathAbs(g_acc) / MathMax(atr * 0.05, 1e-10) * 50.0, 100.0);
+   f60_convexityScore    = MathMin(MathAbs(g_csm) / MathMax(atr * g_convMult, 1e-10) * 25.0, 100.0);
+   f60_obs_Expansion = MathMin((g_eff > g_effThresh ? g_eff * 60.0 : g_eff * 30.0)
+                        + (g_disp > g_dispThresh ? (g_disp / MathMax(g_dispThresh,1e-10) - 1.0) * 20.0 : 0.0)
+                        + ((g_vel > 0 && g_acc > 0) || (g_vel < 0 && g_acc < 0) ? f60_velocityScore * 0.2 : 0.0), 100.0);
+   f60_obs_Decay = MathMin((g_bullMomDecay || g_bearMomDecay ? 40.0 : 0.0)
+                        + (f60_convexityScore > 30 ? f60_convexityScore * 0.5 : 0.0) + (g_vd70 ? 30.0 : 0.0), 100.0);
+   f60_obs_Curvature = f60_convexityScore;
+   f60_obs_Absorption = MathMin((g_eff < g_effThresh * 0.7 ? (1.0 - g_eff/MathMax(g_effThresh,1e-10)) * 50.0 : 0.0)
+                        + (g_vd50 ? 30.0 : 0.0) + (g_disp < g_dispThresh * 0.5 ? 20.0 : 0.0), 100.0);
+   f60_obs_Liquidity = MathMin(f60_obs_Decay * 0.4 + f60_obs_Curvature * 0.4
+                        + (g_disp > g_dispThresh * 1.2 && (g_bullMomDecay || g_bearMomDecay) ? 20.0 : 0.0), 100.0);
+  }
+
+//==================================================================
+//= MODULE: F60Substrate.AttackSequence  (#15 — feeds TE, not replace)
+//   Entry / stop / T1-T3 read straight from the authentic f_se
+//   engines (chart M5 flip-zone + invalidation + objective; M15/H1
+//   secondary/extended objectives). Namespaced f60_*.
+//==================================================================
+double f60_atkEntryPx=0, f60_atkStopPx=0, f60_atkT1Px=0, f60_atkT2Px=0, f60_atkT3Px=0;
+int    f60_atkBias=0;
+
+void f60_updateAttack()
+  {
+   f60_atkEntryPx = (g_se5.o.ft != 0 && g_se5.o.fb != 0) ? (g_se5.o.ft + g_se5.o.fb) / 2.0 : 0;
+   f60_atkStopPx  = g_se5.o.inv;
+   f60_atkT1Px    = g_se5.o.tgt;
+   f60_atkT2Px    = g_se15.o.tgt;
+   f60_atkT3Px    = g_se60.o.tgt;
+   f60_atkBias    = (f60_atkEntryPx==0 || f60_atkT1Px==0) ? f60_waveDir : (f60_atkT1Px >= f60_atkEntryPx ? 1 : -1);
+  }
 
 //==================================================================
 //= MODULE: V60/Network  (Phase V60.2 — Network engine · MTF FU pools · netBias)
