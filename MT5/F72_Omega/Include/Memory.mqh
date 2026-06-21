@@ -104,20 +104,11 @@ public:
          confidence = OMEGA_TRINITY_NEUTRAL;
          return;
         }
-      //-- LifeScore: Layer 6 + 7 + 5 + 5 (force, ownership, chain, compression)
-      life = OmegaMath::Clamp(
-         supporting.forceScore           * 0.35 +
-         supporting.ownershipStability   * 0.25 +
-         supporting.chainHealth          * 0.25 +
-         supporting.compression          * 0.15,
-         0.0, 100.0);
-      //-- StoryStability: Layer 3 + 8 + 9 (alignment, narrative, regime)
-      stability = OmegaMath::Clamp(
-         supporting.alignment            * 0.40 +
-         supporting.narrative            * 0.40 +
-         supporting.regime               * 0.20,
-         0.0, 100.0);
-      //-- StoryConfidence is OWNED by SelfObservation; clamp only here
+      //-- Phase 4 onward: Story::Update() writes life/stability/confidence
+      //    DIRECTLY using the canonical formulas. DeriveTrinity is the
+      //    safety gate — it only clamps to [0,100].
+      life       = OmegaMath::Clamp(life,       0.0, 100.0);
+      stability  = OmegaMath::Clamp(stability,  0.0, 100.0);
       confidence = OmegaMath::Clamp(confidence, 0.0, 100.0);
      }
 

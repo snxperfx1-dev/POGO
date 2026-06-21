@@ -41,7 +41,7 @@ This repo delivers the engine in compile-clean, runnable phases. Each phase plug
 | **1 · Skeleton** | ✅ shipped | `EA · Common · Logger · Memory · CampaignDB · Capital · Risk · PaperTrade · Execution · Session · News` | Attach in OBSERVER mode, watch heartbeat + capital + trinity neutrality logged every N seconds |
 | **2 · Curve physics** | ✅ shipped | `Curve/CurvePhysics · CurveState · Compression · Convexity · Force · Curve` | Per-TF f_se / f_phys port across M1/M3/M5/M15/H1/H4. The Trinity becomes primed once the chart-TF curve is ready: LifeScore receives Force; supporting fields receive Compression, Convexity, MTF Alignment. |
 | **3 · Curve tree** | ✅ shipped | `Tree/CurveNode · Ownership · Transfer · Merge · ChainHealth · CurveTree` | Recursive event-spawned tree (root + children to 4-deep, budget set by compression). Ownership-by-energy (Principle 8). Transfer / Merge detection. Rolling chain vitality. Populates ownershipStability, chainHealth, recursionDepth/Budget. Force composite now folds in residualEnergy + recursionDepth from the tree. |
-| **4 · Narrative** | planned | `Story · LifeScore · NarrativeScore · Alignment · Confidence` | Trinity becomes primed; `LifeScore` and `StoryStability` go live |
+| **4 · Narrative** | ✅ shipped | `Narrative/LifeScore · Alignment · NarrativeScore · Confidence · Story` | LifeScore via the canonical Pine formula (cpForce + residualEnergy ± retrace bonus ± progressing/recursionComplete penalties). NarrativeTracker votes SUPPORT/DEGRADE on each completed pullback → STRENGTHENING/HOLDING/WEAKENING. Alignment + cross-TF story. ConfidenceTracker EMA from internal coherence (ownership stability, chain agreement, alignment, vote dominance). The Trinity goes fully LIVE. |
 | **5 · Campaign positions** | planned | `Execution+ · PositionHealth · CampaignPositions` | Origin / Entry / Progression / Terminal positions, pyramiding, hedge transfer |
 | **6 · Self-observation** | planned | `Probability · SelfObservation · Capital throttle+` | Layer 12–14: probability clouds, confidence decay, regime detection |
 | **7 · Backtesting** | planned | `Replay · Shadow · Optimization · News+` | Replay walks, shadow comparison, parameter study, news feed |
@@ -81,6 +81,12 @@ MT5/F72_Omega/
 │     ├─ Merge.mqh              — child died inside parent → parent reinforced
 │     ├─ ChainHealth.mqh        — chain vitality / scope (CURVE_ONLY / CHAIN_WEAKENING / WHOLE_DECAYING)
 │     └─ CurveTree.mqh          — orchestrator: spawn / energy / death / events / chain
+│  └─ Narrative/                — narrative engine (Phase 4)
+│     ├─ LifeScore.mqh          — canonical _life formula (force/residual/retrace/progressing)
+│     ├─ Alignment.mqh          — fractal stack agreement + cross-TF story label
+│     ├─ NarrativeScore.mqh     — lineage tracker · pullback votes · STRENGTHENING/WEAKENING
+│     ├─ Confidence.mqh         — StoryConfidence EMA from internal coherence (Phase 6 will replace)
+│     └─ Story.mqh              — orchestrator · writes life/stability/confidence into Trinity
 └─ README.md                    — this file
 └─ F72_Omega.mq5                — single-file bundle (regenerated from above)
 ```

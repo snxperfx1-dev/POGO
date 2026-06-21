@@ -2,7 +2,7 @@
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|       *** SINGLE-FILE BUNDLE — Phase 1 + Phase 2 + Phase 3 ***   |
+//|       *** SINGLE-FILE BUNDLE — Phases 1+2+3+4 ***                |
 //|                                                                  |
 //|   This file contains every module of the F72 OMEGA engine        |
 //|   inlined in dependency order. To reproduce the modular layout,  |
@@ -14,8 +14,8 @@
 #property version   "1.00"
 #property strict
 #property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Phases 1+2+3 bundled: skeleton + perception + curve tree."
-#property description "Trinity: LifeScore · StoryStability · StoryConfidence."
+#property description "Phases 1+2+3+4 bundled: skeleton + perception + tree + narrative."
+#property description "Trinity LIVE: LifeScore · StoryStability · StoryConfidence."
 
 #include <Trade/Trade.mqh>
 
@@ -581,20 +581,11 @@ public:
          confidence = OMEGA_TRINITY_NEUTRAL;
          return;
         }
-      //-- LifeScore: Layer 6 + 7 + 5 + 5 (force, ownership, chain, compression)
-      life = OmegaMath::Clamp(
-         supporting.forceScore           * 0.35 +
-         supporting.ownershipStability   * 0.25 +
-         supporting.chainHealth          * 0.25 +
-         supporting.compression          * 0.15,
-         0.0, 100.0);
-      //-- StoryStability: Layer 3 + 8 + 9 (alignment, narrative, regime)
-      stability = OmegaMath::Clamp(
-         supporting.alignment            * 0.40 +
-         supporting.narrative            * 0.40 +
-         supporting.regime               * 0.20,
-         0.0, 100.0);
-      //-- StoryConfidence is OWNED by SelfObservation; clamp only here
+      //-- Phase 4 onward: Story::Update() writes life/stability/confidence
+      //    DIRECTLY using the canonical formulas. DeriveTrinity is the
+      //    safety gate — it only clamps to [0,100].
+      life       = OmegaMath::Clamp(life,       0.0, 100.0);
+      stability  = OmegaMath::Clamp(stability,  0.0, 100.0);
       confidence = OmegaMath::Clamp(confidence, 0.0, 100.0);
      }
 
@@ -3298,6 +3289,709 @@ public:
 #endif // __OMEGA_CURVE_MQH__
 
 //==================================================================
+//= MODULE: Narrative/LifeScore
+//= Source: Include/Narrative/LifeScore.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    LifeScore.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 7 — "Is the trade alive?" The single judgement the art   |
+//|   compresses to. Direct port of the Pine `_life` formula.        |
+//|                                                                  |
+//|   Composite of:                                                  |
+//|     +0.45 × cpForce            — compression persistence force   |
+//|     +0.30 × residualEnergy     — owner curve's energy            |
+//|     +12   if compression tightening (counter side suffocating)   |
+//|     -25   if recursion budget complete and not progressing       |
+//|     -20   if force leaking and not progressing                   |
+//|     +28   if progressing (price attacking owner extreme NOW)     |
+//|     ±retrX bonus by retrace depth (shallow=healthy, deep=danger) |
+//|     +10   base anchor                                            |
+//|                                                                  |
+//|   Output: 0..100. Used directly as the LifeScore in the Trinity. |
+//|   Above 60 = ALIVE / HOLD. Below 32 = DEAD / FLIP. Middle =      |
+//|   WEAKENING / MANAGE.                                            |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_NARRATIVE_LIFESCORE_MQH__
+#define __OMEGA_NARRATIVE_LIFESCORE_MQH__
+
+
+//=== Inputs to the Life formula ====================================
+struct LifeInputs
+  {
+   double  cpForce;             // 0..100, from Force composite
+   double  residualEnergy;      // 0..100, owner curve's energy
+   double  cmpTighten;          // signed Δ compression
+   double  retrX;               // 0..100, retrace from owner extreme toward origin
+   bool    progressing;         // owner extreme is being attacked this bar
+   bool    recursionComplete;   // tree depth has spent the budget
+   bool    forceLeaking;        // ForceState == LEAKING
+
+                     LifeInputs()
+     {
+      cpForce = 50.0; residualEnergy = 50.0; cmpTighten = 0.0; retrX = 50.0;
+      progressing = false; recursionComplete = false; forceLeaking = false;
+     }
+  };
+
+//=== The aliveness verdict =========================================
+enum ENUM_LIFE_VERDICT
+  {
+   LIFE_DEAD       = 0,   // life ≤ 32 → FLIP to counter side
+   LIFE_WEAKENING  = 1,   // 32 < life < 45 → MANAGE
+   LIFE_HOLDING    = 2,   // 45 ≤ life < 60 → HOLD with caution
+   LIFE_ALIVE      = 3    // life ≥ 60 → HOLD with conviction
+  };
+
+class LifeScore
+  {
+public:
+   //--- Compute the life score from the formula above.
+   static double Compute(const LifeInputs &in)
+     {
+      double life = in.cpForce * 0.45
+                  + in.residualEnergy * 0.30
+                  + (in.cmpTighten > 0.0 ? 12.0 : 0.0)
+                  - (in.recursionComplete && !in.progressing ? 25.0 : 0.0)
+                  - (in.forceLeaking      && !in.progressing ? 20.0 : 0.0)
+                  + (in.progressing ? 28.0 : 0.0)
+                  + (in.retrX < 25.0 ?  16.0 :
+                     in.retrX < 45.0 ?   6.0 :
+                     in.retrX > 75.0 ? -12.0 : 0.0)
+                  + 10.0;
+      return OmegaMath::Clamp(life, 0.0, 100.0);
+     }
+
+   //--- Verdict bucket
+   static ENUM_LIFE_VERDICT Verdict(double life)
+     {
+      if(life >= 60.0) return LIFE_ALIVE;
+      if(life >= 45.0) return LIFE_HOLDING;
+      if(life >  32.0) return LIFE_WEAKENING;
+      return LIFE_DEAD;
+     }
+
+   static string VerdictString(ENUM_LIFE_VERDICT v)
+     {
+      switch(v)
+        {
+         case LIFE_DEAD:      return "DEAD";
+         case LIFE_WEAKENING: return "WEAKENING";
+         case LIFE_HOLDING:   return "HOLDING";
+         case LIFE_ALIVE:     return "ALIVE";
+        }
+      return "UNKNOWN";
+     }
+  };
+
+#endif // __OMEGA_NARRATIVE_LIFESCORE_MQH__
+
+//==================================================================
+//= MODULE: Narrative/Alignment
+//= Source: Include/Narrative/Alignment.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                    Alignment.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 4 — Fractal Consciousness · cross-TF agreement.          |
+//|                                                                  |
+//|   Reads each timeframe's direction-by-origin from the multi-TF   |
+//|   curve ladder and emits a coherent alignment score plus a       |
+//|   plain-English Cross-TF story label that mirrors what the Pine  |
+//|   indicator's MTF Curve Map shows.                               |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_NARRATIVE_ALIGNMENT_MQH__
+#define __OMEGA_NARRATIVE_ALIGNMENT_MQH__
+
+
+class Alignment
+  {
+public:
+   //--- count of TFs sharing the reference dir (0..6)
+   static int CountAligned(const OmegaCurve &curve, int refDir)
+     {
+      if(refDir == 0) return 0;
+      int n = 0;
+      if(curve.tfM1.DirByOrigin()  == refDir) n++;
+      if(curve.tfM3.DirByOrigin()  == refDir) n++;
+      if(curve.tfM5.DirByOrigin()  == refDir) n++;
+      if(curve.tfM15.DirByOrigin() == refDir) n++;
+      if(curve.tfH1.DirByOrigin()  == refDir) n++;
+      if(curve.tfH4.DirByOrigin()  == refDir) n++;
+      return n;
+     }
+
+   //--- 0..100 — fractal stack agreement
+   static double Score(int alignedCount) { return (alignedCount / 6.0) * 100.0; }
+
+   //--- HTF agreement (H1 + H4)
+   static int CountHTFAligned(const OmegaCurve &curve, int refDir)
+     {
+      if(refDir == 0) return 0;
+      int n = 0;
+      if(curve.tfH1.DirByOrigin() == refDir) n++;
+      if(curve.tfH4.DirByOrigin() == refDir) n++;
+      return n;
+     }
+
+   //--- Cross-TF story (mirrors the Pine MTF map labels)
+   static string Story(int alignedCount, int refDir)
+     {
+      if(refDir == 0)            return "no dominant owner";
+      if(alignedCount >= 5)      return "all TFs aligned → strong continuation";
+      if(alignedCount == 4)      return "HTFs lead · LTFs following";
+      if(alignedCount <= 2)      return "LTFs counter HTF → pullback / transition";
+      return "mixed → rotation";
+     }
+
+   //--- Per-TF dir snapshot for explainability
+   static string TfRow(const OmegaCurve &curve)
+     {
+      return StringFormat("M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d",
+                          curve.tfM1.DirByOrigin(),  curve.tfM3.DirByOrigin(),
+                          curve.tfM5.DirByOrigin(),  curve.tfM15.DirByOrigin(),
+                          curve.tfH1.DirByOrigin(),  curve.tfH4.DirByOrigin());
+     }
+  };
+
+#endif // __OMEGA_NARRATIVE_ALIGNMENT_MQH__
+
+//==================================================================
+//= MODULE: Narrative/NarrativeScore
+//= Source: Include/Narrative/NarrativeScore.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                              NarrativeScore.mqh  |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 8 — Sequence Intelligence · narrative LINEAGE.           |
+//|                                                                  |
+//|   Tracks the SEQUENCE of entry curves born within the owner's    |
+//|   direction:                                                     |
+//|                                                                  |
+//|     origin curve → entry curve → progress curve → entry curve →  |
+//|     progress curve → terminal curve                              |
+//|                                                                  |
+//|   Each completed pullback within the owner's direction VOTES:    |
+//|     SUPPORT (shallow retrace + tightening) → narrative builds    |
+//|     DEGRADE (deep retrace + broadening)    → narrative fades     |
+//|     NEUTRAL (in between)                   → no shift            |
+//|                                                                  |
+//|   A converging sequence (shallower retraces, rising compression) |
+//|   ⇒ STRENGTHENING; diverging ⇒ WEAKENING.                        |
+//|                                                                  |
+//|   This is "can I keep holding?" answered by lineage, not by the  |
+//|   current curve alone.                                           |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_NARRATIVE_TRACKER_MQH__
+#define __OMEGA_NARRATIVE_TRACKER_MQH__
+
+
+#define OMEGA_NARR_SEQ_CAP   8
+
+enum ENUM_NARRATIVE_VOTE
+  {
+   NARR_VOTE_NONE     = 0,
+   NARR_VOTE_NEUTRAL  = 1,
+   NARR_VOTE_SUPPORT  = 2,
+   NARR_VOTE_DEGRADE  = 3
+  };
+
+enum ENUM_NARRATIVE_STATE
+  {
+   NARR_STATE_HOLDING        = 0,
+   NARR_STATE_STRENGTHENING  = 1,
+   NARR_STATE_WEAKENING      = 2
+  };
+
+class NarrativeTracker
+  {
+private:
+   //--- direction tracking
+   int     m_narrDir;
+   double  m_legExtreme;        // current leg's running extreme price
+   double  m_legPullbackDepth;  // running max % pullback in this leg
+
+   //--- score state
+   double  m_score;             // 0..100
+   ENUM_NARRATIVE_VOTE m_lastVote;
+   int     m_supVotes;
+   int     m_degVotes;
+
+   //--- recent retrace sequence
+   double  m_seqRetr[OMEGA_NARR_SEQ_CAP];
+   int     m_seqHead;
+   int     m_seqCount;
+
+   void PushRetr(double pct)
+     {
+      m_seqRetr[m_seqHead] = pct;
+      m_seqHead = (m_seqHead + 1) % OMEGA_NARR_SEQ_CAP;
+      if(m_seqCount < OMEGA_NARR_SEQ_CAP) m_seqCount++;
+     }
+
+public:
+                     NarrativeTracker() { Reset(); }
+
+   void Reset()
+     {
+      m_narrDir = 0;
+      m_legExtreme = 0.0;
+      m_legPullbackDepth = 0.0;
+      m_score = OMEGA_TRINITY_NEUTRAL;
+      m_lastVote = NARR_VOTE_NONE;
+      m_supVotes = 0;
+      m_degVotes = 0;
+      m_seqHead = 0;
+      m_seqCount = 0;
+      ArrayInitialize(m_seqRetr, 0.0);
+     }
+
+   //--- Per-bar update.
+   //    `ownerDir`: -1/0/+1 from the curve tree's dominant owner
+   //    `ownerOrigin`: parent curve origin price
+   //    `barHigh/Low/Close`: the just-closed bar
+   //    `cmpTighten`: Δ compression over recent bars (see Compression module)
+   void Update(int ownerDir, double ownerOrigin,
+                double barHigh, double barLow, double barClose,
+                double cmpTighten)
+     {
+      //-- ownership direction change → reset lineage
+      if(ownerDir != m_narrDir)
+        {
+         m_narrDir = ownerDir;
+         m_legExtreme = (ownerDir == 1) ? barHigh : (ownerDir == -1 ? barLow : 0.0);
+         m_legPullbackDepth = 0.0;
+         m_score = OMEGA_TRINITY_NEUTRAL;
+         m_supVotes = m_degVotes = 0;
+         m_lastVote = NARR_VOTE_NONE;
+         m_seqHead = 0;
+         m_seqCount = 0;
+         ArrayInitialize(m_seqRetr, 0.0);
+         return;
+        }
+      if(ownerDir == 0 || ownerOrigin == 0.0) return;
+
+      //-- did the leg extend to a new extreme?
+      bool newLegX = false;
+      if(ownerDir == 1)  newLegX = (m_legExtreme == 0.0) || (barHigh > m_legExtreme);
+      if(ownerDir == -1) newLegX = (m_legExtreme == 0.0) || (barLow  < m_legExtreme);
+
+      if(newLegX)
+        {
+         //-- vote on the JUST-COMPLETED pullback (if it was real)
+         if(m_legPullbackDepth > 6.0)
+           {
+            bool sup = (m_legPullbackDepth <= 50.0) && (cmpTighten >= -1.0);
+            bool deg = (m_legPullbackDepth >= 62.0) || (cmpTighten <  -3.0);
+            ENUM_NARRATIVE_VOTE v = NARR_VOTE_NEUTRAL;
+            int delta = 0;
+            if(sup) { v = NARR_VOTE_SUPPORT; delta =  1; m_supVotes++; }
+            else if(deg) { v = NARR_VOTE_DEGRADE; delta = -1; m_degVotes++; }
+            m_lastVote = v;
+            m_score = OmegaMath::Clamp(
+               m_score + delta * 12.0 + (cmpTighten > 0.0 ? 3.0 : -3.0),
+               0.0, 100.0);
+            PushRetr(m_legPullbackDepth);
+           }
+         m_legExtreme = (ownerDir == 1) ? barHigh : barLow;
+         m_legPullbackDepth = 0.0;
+        }
+      else
+        {
+         //-- still pulling back: track running max pullback %
+         double legSpan = MathAbs(m_legExtreme - ownerOrigin);
+         if(legSpan > 1e-9)
+           {
+            double pbd = MathAbs(m_legExtreme - barClose) / legSpan * 100.0;
+            if(pbd > m_legPullbackDepth) m_legPullbackDepth = pbd;
+           }
+        }
+     }
+
+   //--- accessors
+   double Score() const { return m_score; }
+   int    SupportVotes() const  { return m_supVotes; }
+   int    DegradeVotes() const  { return m_degVotes; }
+   int    Direction() const     { return m_narrDir; }
+   ENUM_NARRATIVE_VOTE LastVote() const { return m_lastVote; }
+   double LegPullbackDepth() const  { return m_legPullbackDepth; }
+
+   //--- HOLDING / STRENGTHENING / WEAKENING
+   ENUM_NARRATIVE_STATE State() const
+     {
+      if(m_score >= 65.0) return NARR_STATE_STRENGTHENING;
+      if(m_score <= 35.0) return NARR_STATE_WEAKENING;
+      return NARR_STATE_HOLDING;
+     }
+
+   static string StateString(ENUM_NARRATIVE_STATE s)
+     {
+      switch(s)
+        {
+         case NARR_STATE_STRENGTHENING: return "STRENGTHENING";
+         case NARR_STATE_WEAKENING:     return "WEAKENING";
+         case NARR_STATE_HOLDING:       return "HOLDING";
+        }
+      return "UNKNOWN";
+     }
+
+   static string VoteString(ENUM_NARRATIVE_VOTE v)
+     {
+      switch(v)
+        {
+         case NARR_VOTE_SUPPORT:  return "SUPPORT";
+         case NARR_VOTE_DEGRADE:  return "DEGRADE";
+         case NARR_VOTE_NEUTRAL:  return "NEUTRAL";
+         case NARR_VOTE_NONE:     return "NONE";
+        }
+      return "?";
+     }
+
+   //--- last 2 retrace samples → converging if newest < previous
+   bool Converging() const
+     {
+      if(m_seqCount < 2) return false;
+      int latest   = (m_seqHead - 1 + OMEGA_NARR_SEQ_CAP) % OMEGA_NARR_SEQ_CAP;
+      int previous = (m_seqHead - 2 + OMEGA_NARR_SEQ_CAP) % OMEGA_NARR_SEQ_CAP;
+      return m_seqRetr[latest] < m_seqRetr[previous];
+     }
+
+   //--- short snapshot for heartbeat
+   string Snapshot() const
+     {
+      return StringFormat("%s narr=%.0f S/D=%d/%d last=%s pb=%.0f%% conv=%s",
+                          StateString(State()), m_score,
+                          m_supVotes, m_degVotes,
+                          VoteString(m_lastVote), m_legPullbackDepth,
+                          Converging() ? "Y" : "N");
+     }
+  };
+
+#endif // __OMEGA_NARRATIVE_TRACKER_MQH__
+
+//==================================================================
+//= MODULE: Narrative/Confidence
+//= Source: Include/Narrative/Confidence.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                   Confidence.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 14 — StoryConfidence · "How much do I trust myself?"     |
+//|                                                                  |
+//|   Phase 4 baseline: confidence is a slow-moving composite of the |
+//|   ENGINE's current internal coherence:                           |
+//|                                                                  |
+//|     ownership certainty   — is one curve clearly dominant?       |
+//|     chain-life agreement  — does life agree with chain scope?    |
+//|     compression clarity   — is compression NOT oscillating?      |
+//|     narrative consistency — votes one-sided or balanced?         |
+//|     alignment             — fractal stack agreement              |
+//|                                                                  |
+//|   Phase 6 (SelfObservation) will OVERWRITE this with rolling     |
+//|   hit-rate / contradiction / regime-stability metrics derived    |
+//|   from decision_log.csv. This module's API stays the same so     |
+//|   the upgrade is transparent to upstream.                        |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_NARRATIVE_CONFIDENCE_MQH__
+#define __OMEGA_NARRATIVE_CONFIDENCE_MQH__
+
+
+//=== Inputs ========================================================
+struct ConfidenceInputs
+  {
+   double  ownershipStability;   // 0..100, from tree
+   double  chainHealthScore;     // 0..100, from chain
+   double  life;                 // 0..100, from LifeScore
+   double  compression;          // 0..100, raw
+   double  compTighten;          // signed Δ
+   double  alignment;            // 0..100, from Alignment
+   int     supVotes;             // narrative
+   int     degVotes;             // narrative
+   bool    primed;
+  };
+
+class ConfidenceTracker
+  {
+private:
+   double m_score;       // 0..100, slow-moving
+   double m_alpha;       // EMA smoothing factor
+
+public:
+                     ConfidenceTracker() { Reset(); }
+
+   void Reset()
+     {
+      m_score = OMEGA_TRINITY_NEUTRAL;
+      m_alpha = 0.10;       // ~10-bar half-life
+     }
+
+   void Update(const ConfidenceInputs &in)
+     {
+      if(!in.primed)
+        {
+         //-- not perceiving yet → no claim of confidence
+         m_score = m_score + m_alpha * (OMEGA_TRINITY_NEUTRAL - m_score);
+         return;
+        }
+
+      //-- 1. Ownership certainty: directly from stability score
+      double cOwn = in.ownershipStability;
+
+      //-- 2. Chain-life agreement: chain health and life should AGREE.
+      //     Penalize divergence.
+      double diff = MathAbs(in.chainHealthScore - in.life);
+      double cChain = OmegaMath::Clamp(100.0 - diff, 0.0, 100.0);
+
+      //-- 3. Compression clarity: tightening is more "readable" than oscillation.
+      //     Reward compression movement (either direction); penalize zero/random.
+      double cComp = OmegaMath::Clamp(50.0 + MathAbs(in.compTighten) * 5.0, 0.0, 100.0);
+
+      //-- 4. Narrative consistency: votes one-sided gives confidence,
+      //     balanced votes erodes it.
+      int totVotes = in.supVotes + in.degVotes;
+      double cNarr = OMEGA_TRINITY_NEUTRAL;
+      if(totVotes > 0)
+        {
+         double dom = MathMax(in.supVotes, in.degVotes) / (double)totVotes;
+         cNarr = OmegaMath::Clamp(dom * 100.0, 0.0, 100.0);
+        }
+
+      //-- 5. Alignment: directly from the fractal stack
+      double cAlign = in.alignment;
+
+      //-- weighted blend (Phase 6 will tune via SelfObservation)
+      double composite = cOwn   * 0.25
+                       + cChain * 0.20
+                       + cComp  * 0.15
+                       + cNarr  * 0.15
+                       + cAlign * 0.25;
+      composite = OmegaMath::Clamp(composite, 0.0, 100.0);
+
+      //-- slow EMA (confidence shouldn't whip around)
+      m_score = m_score + m_alpha * (composite - m_score);
+     }
+
+   double Score() const { return m_score; }
+  };
+
+#endif // __OMEGA_NARRATIVE_CONFIDENCE_MQH__
+
+//==================================================================
+//= MODULE: Narrative/Story
+//= Source: Include/Narrative/Story.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                        Story.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 3 → 14 — the Narrative orchestrator.                     |
+//|                                                                  |
+//|   Sits BELOW the Curve+Tree perception and ABOVE Risk/Capital.   |
+//|   On each closed bar it:                                         |
+//|                                                                  |
+//|     1. Reads the chart-TF curve + tree state                     |
+//|     2. Computes LifeScore from the canonical formula             |
+//|     3. Updates the NarrativeTracker (lineage votes)              |
+//|     4. Computes Alignment + cross-TF story                       |
+//|     5. Updates ConfidenceTracker                                 |
+//|     6. Writes life / stability / confidence DIRECTLY into        |
+//|        OmegaState (Memory's DeriveTrinity becomes a clamp guard) |
+//|     7. Emits a plain-English "story" string for the heartbeat    |
+//|                                                                  |
+//|   This is where the Trinity goes fully live. After Phase 4 the   |
+//|   engine has continuous awareness of the life of the story.      |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_NARRATIVE_STORY_MQH__
+#define __OMEGA_NARRATIVE_STORY_MQH__
+
+
+class OmegaStory
+  {
+public:
+   //--- subcomponents
+   NarrativeTracker  narrative;
+   ConfidenceTracker confidence;
+
+   //--- last-update outputs (exposed for snapshot / explainability)
+   double            lastLife;
+   double            lastStability;
+   double            lastConfidence;
+   int               bias;             // -1 / 0 / +1
+   int               alignedCount;
+   string            crossTfStory;
+   ENUM_LIFE_VERDICT lifeVerdict;
+   double            retrX;
+   bool              progressing;
+   bool              recursionComplete;
+
+   //--- bookkeeping
+   string            symbol;
+   long              barsProcessed;
+   datetime          lastBarTime;
+
+                     OmegaStory()
+     {
+      lastLife = lastStability = lastConfidence = OMEGA_TRINITY_NEUTRAL;
+      bias = 0; alignedCount = 0;
+      crossTfStory = "—";
+      lifeVerdict = LIFE_DEAD;
+      retrX = 50.0;
+      progressing = false; recursionComplete = false;
+      symbol = ""; barsProcessed = 0; lastBarTime = 0;
+     }
+
+   void Init(string sym)
+     {
+      symbol = sym;
+      narrative.Reset();
+      confidence.Reset();
+      OmegaLogger::LogInfo("STORY",
+         StringFormat("Init %s · LifeScore + NarrativeTracker + ConfidenceTracker", sym));
+     }
+
+   void Reset()
+     {
+      narrative.Reset();
+      confidence.Reset();
+      lastLife = lastStability = lastConfidence = OMEGA_TRINITY_NEUTRAL;
+      bias = 0; alignedCount = 0;
+      crossTfStory = "—";
+      lifeVerdict = LIFE_DEAD;
+      retrX = 50.0;
+      progressing = false; recursionComplete = false;
+      barsProcessed = 0; lastBarTime = 0;
+     }
+
+   //--- Main per-bar narrative update. Writes directly to OmegaState.
+   bool Update(OmegaState &state, OmegaCurve &curve)
+     {
+      if(!curve.primed) return false;
+      CurveState *chart = curve.ChartTfState();
+      if(chart == NULL) return false;
+      if(!chart.physics.ready) return false;
+      datetime t = chart.lastBarTime;
+      if(t == 0 || t == lastBarTime) return false;
+      lastBarTime = t;
+      barsProcessed++;
+
+      //=== 1. resolve owner state ===================================
+      int idx = curve.tree.ownerIndex;
+      int ownerDir = (idx >= 0) ? curve.tree.tree[idx].dir     : 0;
+      double ownerOrigin  = (idx >= 0) ? curve.tree.tree[idx].origin  : 0.0;
+      double ownerExtreme = (idx >= 0) ? curve.tree.tree[idx].extreme : 0.0;
+      double ownerEnergy  = (idx >= 0) ? curve.tree.tree[idx].energy  : 0.0;
+
+      double bar1Close = iClose(symbol, chart.tf, 1);
+      double bar1High  = iHigh(symbol,  chart.tf, 1);
+      double bar1Low   = iLow(symbol,   chart.tf, 1);
+
+      //=== 2. derived life inputs ===================================
+      progressing = false;
+      if(ownerDir == 1  && ownerExtreme > 0.0) progressing = (bar1High >= ownerExtreme);
+      if(ownerDir == -1 && ownerExtreme > 0.0) progressing = (bar1Low  <= ownerExtreme);
+
+      retrX = 50.0;
+      if(ownerOrigin != 0.0 && ownerExtreme != 0.0 && ownerOrigin != ownerExtreme)
+        {
+         retrX = MathMin(100.0,
+                  MathAbs(ownerExtreme - bar1Close) /
+                  MathAbs(ownerExtreme - ownerOrigin) * 100.0);
+        }
+
+      recursionComplete = (curve.tree.recursionBudget > 0
+                           && curve.tree.treeDepth >= curve.tree.recursionBudget);
+
+      LifeInputs li;
+      li.cpForce           = curve.gForce;
+      li.residualEnergy    = ownerEnergy;
+      li.cmpTighten        = curve.compress.Tightening(5);
+      li.retrX             = retrX;
+      li.progressing       = progressing;
+      li.recursionComplete = recursionComplete;
+      li.forceLeaking      = (curve.gForceState == FORCE_LEAKING);
+
+      double life = LifeScore::Compute(li);
+      lifeVerdict = LifeScore::Verdict(life);
+
+      //=== 3. narrative tracker =====================================
+      narrative.Update(ownerDir, ownerOrigin, bar1High, bar1Low, bar1Close, li.cmpTighten);
+      double narrScore = narrative.Score();
+
+      //=== 4. alignment =============================================
+      bias = ownerDir;
+      alignedCount = Alignment::CountAligned(curve, bias);
+      double alignScore = Alignment::Score(alignedCount);
+      crossTfStory = Alignment::Story(alignedCount, bias);
+
+      //=== 5. stability (Layer 3 fold: alignment + narrative + regime) =====
+      //   Phase 4: regime stays neutral (Phase 6 will populate).
+      double regime = OMEGA_TRINITY_NEUTRAL;
+      double stability = OmegaMath::Clamp(
+         alignScore  * 0.40 +
+         narrScore   * 0.40 +
+         regime      * 0.20,
+         0.0, 100.0);
+
+      //=== 6. confidence ============================================
+      ConfidenceInputs ci;
+      ci.ownershipStability = curve.tree.ownerStability;
+      ci.chainHealthScore   = curve.tree.chain.Score(life);
+      ci.life               = life;
+      ci.compression        = curve.gCompression;
+      ci.compTighten        = li.cmpTighten;
+      ci.alignment          = alignScore;
+      ci.supVotes           = narrative.SupportVotes();
+      ci.degVotes           = narrative.DegradeVotes();
+      ci.primed             = state.primed;
+      confidence.Update(ci);
+
+      //=== 7. write into the trinity ================================
+      state.life       = life;
+      state.stability  = stability;
+      state.confidence = confidence.Score();
+
+      //--- supporting fields (alignment + narrative live now)
+      state.supporting.alignment = alignScore;
+      state.supporting.narrative = narrScore;
+
+      //=== bookkeeping outputs ======================================
+      lastLife       = life;
+      lastStability  = stability;
+      lastConfidence = state.confidence;
+      return true;
+     }
+
+   //--- short snapshot for heartbeat
+   string Snapshot() const
+     {
+      return StringFormat(
+         "L=%.1f(%s) S=%.1f C=%.1f bias=%d align=%d/6 retrX=%.0f%% prog=%s budget=%s · %s · cross=\"%s\"",
+         lastLife, LifeScore::VerdictString(lifeVerdict),
+         lastStability, lastConfidence,
+         bias, alignedCount, retrX,
+         progressing ? "Y" : "N",
+         recursionComplete ? "DONE" : "LEFT",
+         narrative.Snapshot(), crossTfStory);
+     }
+
+   //--- one-line trader voice (extends Snapshot for richer logging)
+   string Voice() const
+     {
+      string lifeStr = LifeScore::VerdictString(lifeVerdict);
+      string biasStr = (bias == 1 ? "BULL" : bias == -1 ? "BEAR" : "NEUTRAL");
+      return StringFormat("%s curve · %s · L=%.0f S=%.0f C=%.0f · %s",
+                          biasStr, lifeStr, lastLife, lastStability, lastConfidence,
+                          crossTfStory);
+     }
+  };
+
+#endif // __OMEGA_NARRATIVE_STORY_MQH__
+
+//==================================================================
 //= MAIN EA BODY (inputs · globals · OnInit/Tick/Timer/Deinit)
 //= Source: EA.mq5
 //==================================================================
@@ -3359,6 +4053,7 @@ OmegaRisk      g_risk;
 CampaignDB     g_db;
 OmegaExecution g_exec;
 OmegaCurve     g_curve;        // Phase 2: multi-TF perception
+OmegaStory     g_story;        // Phase 4: narrative engine
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 
@@ -3399,12 +4094,15 @@ int OnInit()
       OmegaLogger::LogException("EA", -1, "Curve init failed — perception offline.");
      }
 
-//--- 8. Heartbeat
+//--- 8. Narrative (Phase 4): LifeScore + NarrativeTracker + ConfidenceTracker.
+   g_story.Init(_Symbol);
+
+//--- 9. Heartbeat
    EventSetTimer(MathMax(1, InpHeartbeatSec));
 
    OmegaLogger::LogInfo("EA",
-      "Phase 2 perception online · waiting for chart-TF curve readiness (≈" +
-      IntegerToString(InpStructLen) + " bars)");
+      "Phase 4 narrative online · Trinity goes live once chart-TF curve crosses ~" +
+      IntegerToString(InpStructLen) + " bars");
    return INIT_SUCCEEDED;
   }
 
@@ -3443,6 +4141,9 @@ void OnTick()
      {
       g_curve.DeriveSupporting(g_state.supporting);
       g_state.primed = g_curve.primed;
+      //--- Phase 4: narrative reads curve+tree and writes life/stability/
+      //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
+      g_story.Update(g_state, g_curve);
      }
    g_state.DeriveTrinity();
   }
@@ -3458,7 +4159,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s]",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -3468,7 +4169,8 @@ void OnTimer()
          OmegaStr::SessionToString(OmegaSession::Current()),
          OmegaNews::Environment(),
          g_state.Snapshot(),
-         g_curve.Snapshot()));
+         g_curve.Snapshot(),
+         g_story.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

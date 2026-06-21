@@ -32,6 +32,7 @@
 #include "Include/Session.mqh"
 #include "Include/News.mqh"
 #include "Include/Curve/Curve.mqh"
+#include "Include/Narrative/Story.mqh"
 
 //================== INPUTS ==========================================
 input group "═══ Mode (Layer: Human Override Philosophy) ═══"
@@ -74,6 +75,7 @@ OmegaRisk      g_risk;
 CampaignDB     g_db;
 OmegaExecution g_exec;
 OmegaCurve     g_curve;        // Phase 2: multi-TF perception
+OmegaStory     g_story;        // Phase 4: narrative engine
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
 
@@ -114,12 +116,15 @@ int OnInit()
       OmegaLogger::LogException("EA", -1, "Curve init failed — perception offline.");
      }
 
-//--- 8. Heartbeat
+//--- 8. Narrative (Phase 4): LifeScore + NarrativeTracker + ConfidenceTracker.
+   g_story.Init(_Symbol);
+
+//--- 9. Heartbeat
    EventSetTimer(MathMax(1, InpHeartbeatSec));
 
    OmegaLogger::LogInfo("EA",
-      "Phase 2 perception online · waiting for chart-TF curve readiness (≈" +
-      IntegerToString(InpStructLen) + " bars)");
+      "Phase 4 narrative online · Trinity goes live once chart-TF curve crosses ~" +
+      IntegerToString(InpStructLen) + " bars");
    return INIT_SUCCEEDED;
   }
 
@@ -158,6 +163,9 @@ void OnTick()
      {
       g_curve.DeriveSupporting(g_state.supporting);
       g_state.primed = g_curve.primed;
+      //--- Phase 4: narrative reads curve+tree and writes life/stability/
+      //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
+      g_story.Update(g_state, g_curve);
      }
    g_state.DeriveTrinity();
   }
@@ -173,7 +181,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s]",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -183,7 +191,8 @@ void OnTimer()
          OmegaStr::SessionToString(OmegaSession::Current()),
          OmegaNews::Environment(),
          g_state.Snapshot(),
-         g_curve.Snapshot()));
+         g_curve.Snapshot(),
+         g_story.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once
