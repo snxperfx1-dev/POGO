@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v59", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v60", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -1805,7 +1805,6 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     string _attTx = (na(_attP) ? "—" : str.tostring(math.round_to_mintick(_attP))) + " / " + (na(_attS) ? "—" : str.tostring(math.round_to_mintick(_attS))) + " / " + (na(_attE) ? "—" : str.tostring(math.round_to_mintick(_attE)))
     string _oppGrade = oppScore >= 88 ? "A+" : oppScore >= 78 ? "A" : oppScore >= 65 ? "B" : oppScore >= 50 ? "C" : "NO TRADE"
     color  _oppGCol  = oppScore >= 78 ? #34d399 : oppScore >= 65 ? #fbbf24 : oppScore >= 50 ? #fb923c : #fb7185
-    string _alTops = (f_tBias(tMnO) == 1 ? "MN▲ " : f_tBias(tMnO) == -1 ? "MN▼ " : "MN— ") + (f_tBias(tWO) == 1 ? "WK▲ " : f_tBias(tWO) == -1 ? "WK▼ " : "WK— ") + (f_tBias(tDO) == 1 ? "D▲" : f_tBias(tDO) == -1 ? "D▼" : "D—")
     int    _convN = math.min(eligN, webMaxEdges)
     string _szMarket = conflict > 55 ? "ROTATIONAL" : waveProgress >= 90 ? "TERMINAL" : str.contains(ie1a_currentPhase, "Absorption") ? "DISTRIBUTION" : ie1a_currentPhase == "Point 4 Origin" ? "ACCUMULATION" : (fractalStackScore >= 66 and (str.contains(ie1a_currentPhase, "Expansion") or str.contains(ie1a_currentPhase, "New"))) ? "TRENDING" : fractalStackScore < 50 ? "BALANCED" : "EXPANSION"
     string _szEnergy = ede_state == 1 ? "EXPANSION ENERGY" : ede_state == 2 ? "INITIAL DISSIPATION" : ede_state == 3 ? "SECONDARY DISSIPATION" : (ede_state >= 4 and ede_state <= 5) ? "DELIVERY" : re_resolutionState == "PARTIALLY RESOLVED" ? "PARTIALLY RESOLVED" : "UNRESOLVED"
@@ -1931,8 +1930,6 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 1, 11, "« " + f_tIcons(tH1Ht, tH1Lt) + " " + f_tRem(f_tEl(tH1T, "60"), "60"), text_color = f_tCol(tH1Ht, tH1Lt), text_size = size.small)
     table.cell(copilot, 0, 12, "⊙ TGT LOCK  P/S/E", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 12, _attTx, text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 13, "⟁ FORMATION", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 13, _alTops + "  " + str.tostring(math.round(timeAlign)) + "%", text_color = timeAlign >= 60 ? #34d399 : #fbbf24, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 14, "⟁ H4 / H1", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 14, _alH4 + " / " + _alH1, text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 15, "▣ FIRING SOLUTION", text_color = #03120a, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_oppGCol, 28))
@@ -2454,7 +2451,6 @@ if barstate.islast and showCurve
 if barstate.islast and showCurve
     // curve tree writes into the shared topT table, columns 4-5
     string _odTx = _ownDirT == 1 ? "▲ BULL" : _ownDirT == -1 ? "▼ BEAR" : "○ —"
-    bool   _phaseAgree = _ownState != "—" and (str.contains(_ownState, "Expansion") == str.contains(ie1a_currentPhase, "Expansion")) and (str.contains(_ownState, "Retracement") == str.contains(ie1a_currentPhase, "Retracement"))
     string _ownLoc = (na(_ownOrig) or na(_ownExt)) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " → " + str.tostring(math.round_to_mintick(_ownExt)) + " → " + str.tostring(math.round_to_mintick(close))
     float  _retrFromX = (na(_ownOrig) or na(_ownExt) or _ownExt == _ownOrig) ? na : math.abs(_ownExt - close) / math.abs(_ownExt - _ownOrig) * 100.0
     // resolve the tree into ONE tradeable direction: curve alive → trade WITH the
@@ -2476,10 +2472,8 @@ if barstate.islast and showCurve
     // ── PHASE SOURCE FLIPPED — the emergent NODE state is now the authority (the
     //    label the curve drives); the legacy machine phase is shown only as a cross-ref.
     table.cell(topT, 4, 5, "● PHASE (LIVE · node)", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 5, _ownState + (_phaseAgree ? "  ✓ machine" : "  ≠ machine"), text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 4, 6, "Phase · machine (ref)", text_color = #64748b, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 6, ie1a_currentPhase, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     // ── F72 Principle 10 — compression persistence: can the counter side build? ──
+    table.cell(topT, 5, 5, _ownState, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 4, 7, "Force (compression persist)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(topT, 5, 7, _cpState + "  " + str.tostring(math.round(_cpForce)) + "  " + _cpTrend, text_color = _cpState == "PERSISTING" ? #34d399 : _cpState == "LEAKING" ? #fb7185 : #fbbf24, text_size = size.small)
     table.cell(topT, 4, 8, _cpState == "LEAKING" ? "Defends (origin in play)" : "Ownership migrated → defends", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
