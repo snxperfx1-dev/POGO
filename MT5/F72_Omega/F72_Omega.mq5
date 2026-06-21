@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.5.2"
+#define OMEGA_VERSION                "1.0.0-phase5.5.3"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -3516,18 +3516,11 @@ public:
       supp.chainHealth        = tree.chain.Score(tree.ownerLife);
       supp.recursionDepth     = tree.treeDepth;
       supp.recursionBudget    = tree.recursionBudget;
-      //-- alignment: how many of the 6 TFs share the chart's direction
-      int sameDir = 0;
-      if(gDir != 0)
-        {
-         if(tfM1.DirByOrigin()  == gDir) sameDir++;
-         if(tfM3.DirByOrigin()  == gDir) sameDir++;
-         if(tfM5.DirByOrigin()  == gDir) sameDir++;
-         if(tfM15.DirByOrigin() == gDir) sameDir++;
-         if(tfH1.DirByOrigin()  == gDir) sameDir++;
-         if(tfH4.DirByOrigin()  == gDir) sameDir++;
-        }
-      supp.alignment    = (sameDir / 6.0) * 100.0;
+      //-- Phase 5.5.3: alignment is computed by the Story engine
+      //   from RELATIONSHIPS (NarrativeAlignment::Compute), NOT from
+      //   counting TF directions. Leave neutral here — Story overwrites
+      //   on every closed bar with the canonical narrative score.
+      supp.alignment    = OMEGA_TRINITY_NEUTRAL;
       supp.narrative    = OMEGA_TRINITY_NEUTRAL; // Phase 4
       supp.regime       = OMEGA_TRINITY_NEUTRAL; // Phase 6
       supp.pContinuation= 0; supp.pTerminal = 0; supp.pTransfer = 0; // Phase 6
@@ -3537,7 +3530,7 @@ public:
    string Snapshot() const
      {
       return StringFormat(
-         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f align=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d · tree[%s]",
+         "dir=%d F=%.0f(%s/%s) C=%.0f X=%.0f mat=%.0f tf-info=M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d · tree[%s]",
          gDir, gForce, ForceHelper::StateString(gForceState), gForceTrend,
          gCompression, gConvexity, gMaturity,
          tfM1.DirByOrigin(),  tfM3.DirByOrigin(),  tfM5.DirByOrigin(),
@@ -3547,701 +3540,6 @@ public:
   };
 
 #endif // __OMEGA_CURVE_MQH__
-//==================================================================
-//= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
-//= Source: Include/Chart.mqh
-//==================================================================
-//+------------------------------------------------------------------+
-//|                                                        Chart.mqh |
-//|                                                        F72 OMEGA |
-//|                                                                  |
-//|  See what the engine is seeing and doing — directly on the chart |
-//|  it's attached to. Every visual is a native MT5 chart object     |
-//|  (OBJ_RECTANGLE_LABEL, OBJ_LABEL, OBJ_RECTANGLE, OBJ_TREND,      |
-//|  OBJ_ARROW, OBJ_TEXT). All names share a magic-prefix so cleanup |
-//|  on Deinit is bulletproof.                                       |
-//|                                                                  |
-//|  The chart layer reads the same Trinity + curve tree + per-tier  |
-//|  state that the trading engine reads — it is a pure observer.    |
-//|  It can never affect a decision.                                 |
-//|                                                                  |
-//|  Layout:                                                         |
-//|    HUD panel (top-left)         — Trinity bars · tier · verdict  |
-//|    MTF map (top-right)          — per-TF direction + state       |
-//|    Owner-curve box (price)      — origin→extreme rectangle       |
-//|    Budget-target arrow (price)  — current px → owner.extreme     |
-//|    FU spike marks (chart bars)  — rejection-wick detector        |
-//|    Position labels (entry bars) — tier · int · act risk          |
-//+------------------------------------------------------------------+
-#ifndef __OMEGA_CHART_MQH__
-#define __OMEGA_CHART_MQH__
-
-class OmegaChart
-  {
-private:
-   string  m_prefix;
-   bool    m_enabled;
-   bool    m_drawHUD;
-   bool    m_drawMTF;
-   bool    m_drawOwner;
-   bool    m_drawFlip;
-   bool    m_drawBudget;
-   bool    m_drawFU;
-   bool    m_drawPositions;
-   int     m_hudCorner;          // CORNER_LEFT_UPPER etc.
-   int     m_hudX, m_hudY;
-   int     m_mtfCorner;
-   int     m_mtfX, m_mtfY;
-   int     m_lineHeight;         // pixels per HUD row
-   int     m_hudWidth;           // px
-   int     m_mtfWidth;           // px
-   color   m_bg;
-   color   m_fg;
-   color   m_dim;
-   color   m_bull;
-   color   m_bear;
-   color   m_warn;
-   double  m_fuWickFrac;
-   int     m_fuLookback;
-   int     m_minAlign;            // 4-of-6 default — used by the gate line
-   long    m_lastOwnerId;
-   datetime m_lastOwnerTime;
-   int     m_posCounter;         // monotonic for position-marker names
-
-   //--- Object name helpers
-   string N(string sub) const { return m_prefix + "_" + sub; }
-
-   void DelByPrefix(string sub)
-     {
-      string match = m_prefix + "_" + sub;
-      int total = ObjectsTotal(0, -1, -1);
-      for(int i = total - 1; i >= 0; i--)
-        {
-         string name = ObjectName(0, i, -1, -1);
-         if(StringFind(name, match) == 0) ObjectDelete(0, name);
-        }
-     }
-
-   //--- Pixel-anchored label (HUD/MTF). Always set ANCHOR + corner so
-   //    the panel sticks to the configured corner regardless of zoom.
-   void EnsureLabel(string name, int corner, int x, int y, string txt,
-                    color clr, int sz = 9, string font = "Consolas")
-     {
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-      ObjectSetString (0, name, OBJPROP_TEXT,      txt);
-      ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
-      ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  sz);
-      ObjectSetString (0, name, OBJPROP_FONT,      font);
-      ObjectSetInteger(0, name, OBJPROP_BACK,      false);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
-     }
-
-   //--- Pixel-anchored rectangle background (HUD frame).
-   void EnsureRectLabel(string name, int corner, int x, int y, int w, int h,
-                         color bg, color border)
-     {
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
-      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
-      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
-      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
-      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-      ObjectSetInteger(0, name, OBJPROP_XSIZE,     w);
-      ObjectSetInteger(0, name, OBJPROP_YSIZE,     h);
-      ObjectSetInteger(0, name, OBJPROP_BGCOLOR,   bg);
-      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, name, OBJPROP_COLOR,     border);
-      ObjectSetInteger(0, name, OBJPROP_BACK,      true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
-     }
-
-   //--- Generic 0..100 ASCII bar (10 cells) — visible without unicode tricks.
-   string GaugeBar(double v) const
-     {
-      v = MathMax(0.0, MathMin(100.0, v));
-      int filled = (int)MathRound(v / 10.0);
-      string s = "[";
-      for(int i = 0; i < 10; i++) s += (i < filled) ? "#" : ".";
-      s += "]";
-      return s;
-     }
-
-   //--- TF arrow glyph
-   string DirArrow(int d) const { return d == 1 ? "^" : d == -1 ? "v" : "-"; }
-   color  DirColor(int d) const { return d == 1 ? m_bull : d == -1 ? m_bear : m_dim; }
-
-public:
-                     OmegaChart()
-     {
-      m_prefix = "OMEGA";
-      m_enabled = true;
-      m_drawHUD = true;
-      m_drawMTF = true;
-      m_drawOwner = true;
-      m_drawFlip = true;
-      m_drawBudget = true;
-      m_drawFU = true;
-      m_drawPositions = true;
-      m_hudCorner = CORNER_LEFT_UPPER;
-      m_hudX = 8;  m_hudY = 24;
-      m_mtfCorner = CORNER_RIGHT_UPPER;
-      m_mtfX = 8;  m_mtfY = 24;
-      m_lineHeight = 14;
-      m_hudWidth = 280;
-      m_mtfWidth = 220;
-      m_bg   = (color)0x0A0E27;
-      m_fg   = (color)0xD7FAFF;
-      m_dim  = (color)0x94A3B8;
-      m_bull = (color)0x34D399;
-      m_bear = (color)0x6285FB;     // BGR for #FB7185
-      m_warn = (color)0x24BFFB;     // BGR for #FBBF24
-      m_fuWickFrac = 0.30;
-      m_fuLookback = 5;
-      m_minAlign   = 4;
-      m_lastOwnerId = -1;
-      m_lastOwnerTime = 0;
-      m_posCounter = 0;
-     }
-
-   void Init(string prefix, bool enabled,
-             bool drawHUD, bool drawMTF, bool drawOwner, bool drawFlip, bool drawBudget,
-             bool drawFU,  bool drawPositions,
-             double fuWickFrac = 0.30, int fuLookback = 5)
-     {
-      m_prefix         = (StringLen(prefix) > 0) ? prefix : "OMEGA";
-      m_enabled        = enabled;
-      m_drawHUD        = drawHUD;
-      m_drawMTF        = drawMTF;
-      m_drawOwner      = drawOwner;
-      m_drawFlip       = drawFlip;
-      m_drawBudget     = drawBudget;
-      m_drawFU         = drawFU;
-      m_drawPositions  = drawPositions;
-      m_fuWickFrac     = fuWickFrac;
-      m_fuLookback     = fuLookback;
-      OmegaLogger::LogInfo("CHART",
-         StringFormat("Init · enabled=%s · HUD=%s MTF=%s owner=%s flip=%s budget=%s FU=%s pos=%s · prefix=%s",
-                      enabled ? "YES" : "NO",
-                      drawHUD ? "Y" : "N", drawMTF ? "Y" : "N", drawOwner ? "Y" : "N",
-                      drawFlip ? "Y" : "N", drawBudget ? "Y" : "N",
-                      drawFU ? "Y" : "N", drawPositions ? "Y" : "N",
-                      m_prefix));
-     }
-
-   void Deinit()
-     {
-      // sweep every object whose name starts with the magic prefix
-      string match = m_prefix + "_";
-      int total = ObjectsTotal(0, -1, -1);
-      for(int i = total - 1; i >= 0; i--)
-        {
-         string name = ObjectName(0, i, -1, -1);
-         if(StringFind(name, match) == 0) ObjectDelete(0, name);
-        }
-      ChartRedraw(0);
-     }
-
-   //--- Phase 5.5 — wire the entry-alignment gate from EA inputs so the
-   //    HUD's gate line stays in sync with the decision engine.
-   void SetEntryGates(int minAlign) { m_minAlign = minAlign; }
-
-   //--- Per-tick update (called from EA OnTick).
-   void Update(const OmegaState &state, OmegaCurve &curve,
-               OmegaRisk &risk, OmegaCapital &capital,
-               ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
-     {
-      if(!m_enabled) return;
-
-      ENUM_OMEGA_TIER tier = risk.TierForCap(capital);
-      double effEq = risk.EffectiveEquity(capital);
-
-      if(m_drawHUD)    UpdateHUD(state, curve, tier, risk, effEq, lastDec, lastReason);
-      if(m_drawMTF)    UpdateMTFMap(curve);
-      if(m_drawOwner)  UpdateOwnerBox(curve);
-      if(m_drawFlip)   UpdateFlipZone(curve);
-      if(m_drawBudget) UpdateBudgetTarget(curve);
-      if(m_drawFU)     UpdateFUMarks();
-
-      ChartRedraw(0);
-     }
-
-   //--- Called from CampaignPositions::Open after a successful entry.
-   //    Drops a marker arrow + label at the bar where the trade fired.
-   void OnPositionOpen(string symbol, ulong ticket, int direction,
-                        double openPx, double sl,
-                        ENUM_OMEGA_TIER tier, double intendedPct, double actualPct,
-                        double lots, string detail)
-     {
-      if(!m_enabled || !m_drawPositions) return;
-      m_posCounter++;
-      string an = N("POS_ARR_" + IntegerToString(m_posCounter));
-      string ln = N("POS_LBL_" + IntegerToString(m_posCounter));
-      datetime t = TimeCurrent();
-      color c = (direction == 1) ? m_bull : m_bear;
-
-      if(ObjectFind(0, an) < 0) ObjectCreate(0, an, OBJ_ARROW, 0, t, openPx);
-      ObjectSetInteger(0, an, OBJPROP_ARROWCODE, direction == 1 ? 233 : 234);  // up/down arrows
-      ObjectSetInteger(0, an, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, an, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, an, OBJPROP_BACK,  false);
-      ObjectSetInteger(0, an, OBJPROP_HIDDEN,true);
-      ObjectSetString (0, an, OBJPROP_TOOLTIP,
-         StringFormat("%s #%I64u · %.2f lots @ %.5f · SL %.5f · int %.2f%% act %.2f%%",
-                       direction == 1 ? "BUY" : "SELL", ticket, lots, openPx, sl,
-                       intendedPct, actualPct));
-
-      string txt = StringFormat("%s %.2f", direction == 1 ? "B" : "S", lots);
-      if(ObjectFind(0, ln) < 0) ObjectCreate(0, ln, OBJ_TEXT, 0, t, openPx);
-      ObjectSetString (0, ln, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, ln, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, ln, OBJPROP_FONTSIZE, 8);
-      ObjectSetString (0, ln, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, ln, OBJPROP_ANCHOR,
-                        direction == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
-      ObjectSetInteger(0, ln, OBJPROP_HIDDEN, true);
-     }
-
-private:
-   //=== HUD =========================================================
-   void UpdateHUD(const OmegaState &s, OmegaCurve &curve,
-                  ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
-                  ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
-     {
-      int rows = 13;
-      int W = m_hudWidth;
-      int H = m_lineHeight * rows + 14;
-      int X = m_hudX;
-      int Y = m_hudY;
-      // background frame
-      EnsureRectLabel(N("HUD_BG"), m_hudCorner, X, Y, W, H, m_bg, m_dim);
-
-      int row = 0;
-      int rx = X + 8;
-      int ry = Y + 8;
-
-      // Per-tier conviction floors
-      double minLife = risk.TierMinLife(tier);
-      double minStab = risk.TierMinStab(tier);
-      double minConf = risk.TierMinConf(tier);
-
-      bool lifeOK = (s.life       >= minLife);
-      bool stabOK = (s.stability  >= minStab);
-      bool confOK = (s.confidence >= minConf);
-
-      // Approximate alignment count from supporting.alignment 0..100
-      // (decision engine threshold is in TFs out of 6) — INFO only,
-      // never blocks an entry. The curve tree owner is the actual gate.
-      int alignedN = (int)MathRound(s.supporting.alignment / 100.0 * 6.0);
-
-      // Title
-      EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   "F72 OMEGA  ·  v" + OMEGA_VERSION, m_fg, 10, "Consolas");
-      row++;
-
-      // Tier line
-      string tierLine = StringFormat("Tier %s  ·  eq %.2f  ·  cap %.2f%%  ·  pyr %d",
-                                     risk.TierStr(tier), effEq,
-                                     risk.TierMaxRiskPct(tier),
-                                     risk.TierMaxBudget(tier));
-      color tcol = (tier == TIER_MICRO) ? m_warn :
-                   (tier == TIER_SMALL) ? m_warn : m_fg;
-      EnsureLabel(N("HUD_TIER"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   tierLine, tcol);
-      row++;
-
-      // Trinity bars — each shows value, gauge, tier floor, pass/fail mark
-      string lifeStr = StringFormat("life  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.life), s.life, minLife,
-                                     lifeOK ? "OK" : "X");
-      string stabStr = StringFormat("stab  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.stability), s.stability, minStab,
-                                     stabOK ? "OK" : "X");
-      string confStr = StringFormat("conf  %s %5.1f  >=%.0f  %s",
-                                     GaugeBar(s.confidence), s.confidence, minConf,
-                                     confOK ? "OK" : "X");
-      EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   lifeStr, lifeOK ? m_bull : m_bear);
-      row++;
-      EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   stabStr, stabOK ? m_bull : m_bear);
-      row++;
-      EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   confStr, confOK ? m_bull : m_bear);
-      row++;
-
-      // Alignment row — INFO only (lower TFs rotating against higher
-      // TFs is the curve tree at work, not a problem to filter out).
-      string alignStr = StringFormat("align            %d/6  (info — child rotation OK)", alignedN);
-      EnsureLabel(N("HUD_ALIGN"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   alignStr, m_dim);
-      row++;
-
-      // Owner curve
-      int oidx = curve.tree.ownerIndex;
-      int oDir = (oidx >= 0) ? curve.tree.tree[oidx].dir : 0;
-      double oNrg = (oidx >= 0) ? curve.tree.tree[oidx].energy : 0.0;
-      string oState = (oidx >= 0) ? curve.tree.tree[oidx].state : "—";
-      int oDepth   = (oidx >= 0) ? curve.tree.tree[oidx].depth : 0;
-      string ownLine = StringFormat("owner %s  d%d  e%4.1f  %s",
-                                     DirArrow(oDir), oDepth, oNrg, oState);
-      EnsureLabel(N("HUD_OWNER"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   ownLine, DirColor(oDir));
-      row++;
-
-      // Curve coordinates
-      double oOrig = (oidx >= 0) ? curve.tree.tree[oidx].origin  : 0.0;
-      double oExt  = (oidx >= 0) ? curve.tree.tree[oidx].extreme : 0.0;
-      double px    = (SymbolInfoDouble(_Symbol, SYMBOL_BID) > 0)
-                      ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : 0.0;
-      string coord = (oidx >= 0)
-         ? StringFormat("%.5f -> %.5f -> %.5f", oOrig, oExt, px)
-         : "no owning curve";
-      EnsureLabel(N("HUD_COORD"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   coord, m_warn);
-      row++;
-
-      // Supporting (force / regime)
-      string supp = StringFormat("force %5.1f  comp %5.1f  regime %s",
-                                  s.supporting.forceScore,
-                                  s.supporting.compression,
-                                  s.supporting.regime > 0 ? "trend" :
-                                  s.supporting.regime < 0 ? "rotate" : "mixed");
-      EnsureLabel(N("HUD_SUPP"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   supp, m_dim);
-      row++;
-
-      // Verdict (last decision)
-      string verdict = OmegaStr::DecisionToString(lastDec);
-      color vcol = (lastDec == OMEGA_DEC_ENTER_LONG || lastDec == OMEGA_DEC_ENTER_SHORT
-                     || lastDec == OMEGA_DEC_ADD || lastDec == OMEGA_DEC_REVERSE) ? m_bull
-                  : (lastDec == OMEGA_DEC_EXIT || lastDec == OMEGA_DEC_REDUCE) ? m_warn
-                  : m_dim;
-      string vline = "verdict " + verdict;
-      EnsureLabel(N("HUD_VERD"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   vline, vcol);
-      row++;
-
-      // Reason
-      string reason = "reason  " + OmegaStr::ReasonToString(lastReason);
-      EnsureLabel(N("HUD_REAS"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   reason, m_dim);
-      row++;
-
-      // Probabilities
-      string prob = StringFormat("p(cont/term/trans) %3.0f / %3.0f / %3.0f",
-                                  s.supporting.pContinuation,
-                                  s.supporting.pTerminal,
-                                  s.supporting.pTransfer);
-      EnsureLabel(N("HUD_PROB"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   prob, m_dim);
-      row++;
-
-      // GATE line — explicit pass/fail summary so the user can SEE why
-      // the engine is or isn't entering. The actual gates are: owner
-      // exists + Trinity floors. Alignment is informational, never a gate.
-      string gate = "";
-      bool   ownerOK = (curve.tree.ownerIndex >= 0 && oDir != 0);
-      if(!s.primed)         gate = "WARMUP — perception not primed yet";
-      else
-        {
-         string blockers = "";
-         if(!ownerOK) blockers += "no owning curve  ";
-         if(!lifeOK)  blockers += StringFormat("life %.0f<%.0f  ", s.life,       minLife);
-         if(!stabOK)  blockers += StringFormat("stab %.0f<%.0f  ", s.stability,  minStab);
-         if(!confOK)  blockers += StringFormat("conf %.0f<%.0f  ", s.confidence, minConf);
-         if(StringLen(blockers) == 0) gate = "GATES OPEN — entry eligible";
-         else                          gate = "BLOCKED  " + blockers;
-        }
-      bool gateOpen = (StringFind(gate, "OPEN") == 0);
-      EnsureLabel(N("HUD_GATE"), m_hudCorner, rx, ry + row * m_lineHeight,
-                   gate, gateOpen ? m_bull : m_bear);
-      row++;
-     }
-
-   //=== MTF Map =====================================================
-   void UpdateMTFMap(OmegaCurve &curve)
-     {
-      int rows = 8;
-      int W = m_mtfWidth;
-      int H = m_lineHeight * rows + 14;
-      int X = m_mtfX;
-      int Y = m_mtfY;
-      EnsureRectLabel(N("MTF_BG"), m_mtfCorner, X, Y, W, H, m_bg, m_dim);
-
-      int row = 0;
-      int rx = X + 8;
-      int ry = Y + 8;
-
-      EnsureLabel(N("MTF_TITLE"), m_mtfCorner, rx, ry + row * m_lineHeight,
-                   "MTF CURVE MAP", m_fg, 10, "Consolas");
-      row++;
-
-      // Per-TF row helper. CurveState exposes its direction via .currentDir
-      // and the emergent state via .narrative or similar — we use the
-      // public Snapshot() string fallback if needed.
-      WriteTFRow(N("MTF_M1"),  curve.tfM1,  "M1",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_M5"),  curve.tfM5,  "M5",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_M15"), curve.tfM15, "M15", rx, ry, row); row++;
-      WriteTFRow(N("MTF_H1"),  curve.tfH1,  "H1",  rx, ry, row); row++;
-      WriteTFRow(N("MTF_H4"),  curve.tfH4,  "H4",  rx, ry, row); row++;
-
-      // Alignment summary
-      int a = AlignmentCount(curve);
-      string al = StringFormat("aligned %d / 5", a);
-      color  ac = (a >= 4) ? m_bull : (a <= 2) ? m_bear : m_warn;
-      EnsureLabel(N("MTF_ALIGN"), m_mtfCorner, rx, ry + row * m_lineHeight,
-                   al, ac);
-     }
-
-   void WriteTFRow(string name, CurveState &tf, string lbl, int rx, int ry, int row)
-     {
-      int d = tf.dir;
-      // Inline emergent state name from CurveState's composite scores.
-      string ph;
-      if(!tf.ready)                         ph = "warmup";
-      else if(tf.compIdx     >= 60.0)       ph = "compress";
-      else if(tf.absScore    >= 60.0)       ph = "absorb";
-      else if(tf.expScore    >= 60.0)       ph = "expand";
-      else if(tf.convScore   >= 60.0)       ph = "convex";
-      else if(tf.waveProgress >= 75.0)      ph = "mature";
-      else                                  ph = "forming";
-      string s = StringFormat("%-3s %s  %s", lbl, DirArrow(d), ph);
-      EnsureLabel(name, m_mtfCorner, rx, ry + row * m_lineHeight,
-                   s, DirColor(d));
-     }
-
-   int AlignmentCount(OmegaCurve &curve)
-     {
-      // Count TFs whose direction matches the chart-TF direction.
-      CurveState *chart = curve.ChartTfState();
-      if(chart == NULL) return 0;
-      int ref = chart.dir;
-      if(ref == 0) return 0;
-      int n = 0;
-      if(curve.tfM1.dir  == ref) n++;
-      if(curve.tfM5.dir  == ref) n++;
-      if(curve.tfM15.dir == ref) n++;
-      if(curve.tfH1.dir  == ref) n++;
-      if(curve.tfH4.dir  == ref) n++;
-      return n;
-     }
-
-   //=== Owner curve box =============================================
-   void UpdateOwnerBox(OmegaCurve &curve)
-     {
-      int oidx = curve.tree.ownerIndex;
-      string name = N("OWNERBOX");
-      string lblName = N("OWNERLBL");
-      if(oidx < 0)
-        {
-         if(ObjectFind(0, name)    >= 0) ObjectDelete(0, name);
-         if(ObjectFind(0, lblName) >= 0) ObjectDelete(0, lblName);
-         return;
-        }
-      CurveNode owner = curve.tree.tree[oidx];
-      if(!owner.alive || owner.origin <= 0 || owner.extreme <= 0) return;
-
-      datetime t1 = (owner.birthTime > 0) ? owner.birthTime : TimeCurrent() - 3600 * 24;
-      datetime t2 = TimeCurrent();
-      double hi = MathMax(owner.origin, owner.extreme);
-      double lo = MathMin(owner.origin, owner.extreme);
-      color  c  = (owner.dir == 1) ? m_bull : (owner.dir == -1) ? m_bear : m_dim;
-
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, owner.depth > 0 ? 1 : 2);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, owner.depth > 0 ? STYLE_DASH : STYLE_SOLID);
-      ObjectSetInteger(0, name, OBJPROP_FILL,  false);
-      ObjectSetInteger(0, name, OBJPROP_BACK,  true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-
-      // Label at the extreme
-      string txt = StringFormat("OWNER %s  %s  e%.1f",
-                                  owner.dir == 1 ? "^" : "v",
-                                  owner.state, owner.energy);
-      if(ObjectFind(0, lblName) < 0)
-         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
-      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
-      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
-      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
-     }
-
-   //=== Flip Zone box ===============================================
-   //   Use the chart-TF CurveState's ft/fb (flip zone top/bottom) —
-   //   the structural pivot the wave defends. Right-extended so the
-   //   trader sees the level price will react to.
-   void UpdateFlipZone(OmegaCurve &curve)
-     {
-      string name = N("FLIPZONE");
-      string lbl  = N("FLIPZONELBL");
-      CurveState *cs = curve.ChartTfState();
-      if(cs == NULL || cs.ft <= 0 || cs.fb <= 0)
-        {
-         if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
-         if(ObjectFind(0, lbl)  >= 0) ObjectDelete(0, lbl);
-         return;
-        }
-      datetime t1 = TimeCurrent() - PeriodSeconds(_Period) * 60;
-      datetime t2 = TimeCurrent() + PeriodSeconds(_Period) * 12;
-      double hi = MathMax(cs.ft, cs.fb);
-      double lo = MathMin(cs.ft, cs.fb);
-      color  c  = (cs.dir == 1) ? m_bull : (cs.dir == -1) ? m_bear : (color)0xC084FC;
-
-      if(ObjectFind(0, name) < 0)
-         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
-      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, name, OBJPROP_FILL, true);
-      ObjectSetInteger(0, name, OBJPROP_BACK, true);
-      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-
-      if(ObjectFind(0, lbl) < 0)
-         ObjectCreate(0, lbl, OBJ_TEXT, 0, t2, (hi + lo) / 2.0);
-      ObjectSetInteger(0, lbl, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lbl, OBJPROP_PRICE, 0, (hi + lo) / 2.0);
-      ObjectSetString (0, lbl, OBJPROP_TEXT, "FLIP ZONE");
-      ObjectSetInteger(0, lbl, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
-      ObjectSetString (0, lbl, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_LEFT);
-      ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
-     }
-
-   //=== Budget target ===============================================
-   void UpdateBudgetTarget(OmegaCurve &curve)
-     {
-      int oidx = curve.tree.ownerIndex;
-      string lineName = N("BUDGET_LINE");
-      string lblName  = N("BUDGET_LBL");
-      if(oidx < 0)
-        {
-         if(ObjectFind(0, lineName) >= 0) ObjectDelete(0, lineName);
-         if(ObjectFind(0, lblName)  >= 0) ObjectDelete(0, lblName);
-         return;
-        }
-      CurveNode owner = curve.tree.tree[oidx];
-      if(!owner.alive || owner.extreme <= 0) return;
-
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      if(bid <= 0) return;
-
-      datetime t1 = TimeCurrent();
-      datetime t2 = t1 + PeriodSeconds(_Period) * 12;
-      color  c  = (owner.dir == 1) ? m_warn : (owner.dir == -1) ? m_bear : m_dim;
-
-      if(ObjectFind(0, lineName) < 0)
-         ObjectCreate(0, lineName, OBJ_TREND, 0, t1, bid, t2, owner.extreme);
-      ObjectSetInteger(0, lineName, OBJPROP_TIME, 0, t1);
-      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 0, bid);
-      ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, t2);
-      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 1, owner.extreme);
-      ObjectSetInteger(0, lineName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
-      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
-      ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
-      ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
-
-      string txt = StringFormat(">> BUDGET TGT  %.5f  d%d/%d",
-                                  owner.extreme, owner.depth, 4);
-      if(ObjectFind(0, lblName) < 0)
-         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
-      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
-      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
-      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
-      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
-      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
-      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
-      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
-     }
-
-   //=== FU spike marks ==============================================
-   //   Wick-fraction detector identical to the Pine indicator's f_fuPool
-   //   shape — runs on chart bars, marks with up/down arrow + barcolor.
-   void UpdateFUMarks()
-     {
-      // Only mark the most-recent confirmed bar to keep object count low.
-      // (The chart accumulates one mark per FU bar over time as bars close.)
-      MqlRates r[];
-      ArraySetAsSeries(r, true);
-      if(CopyRates(_Symbol, _Period, 0, MathMax(m_fuLookback + 2, 6), r) <= 0) return;
-      // r[0] = forming bar, r[1] = last closed bar
-      if(ArraySize(r) < 2) return;
-      MqlRates b = r[1];
-
-      double rng = MathMax(b.high - b.low, _Point);
-      double upperW = (b.high - MathMax(b.open, b.close)) / rng;
-      double lowerW = (MathMin(b.open, b.close) - b.low)  / rng;
-
-      // Highest/lowest among the prior lookback bars (excluding b itself)
-      double pHi = 0, pLo = 0;
-      bool   pOk = false;
-      if(ArraySize(r) >= 2 + m_fuLookback)
-        {
-         pHi = r[2].high;
-         pLo = r[2].low;
-         for(int i = 3; i < 2 + m_fuLookback && i < ArraySize(r); i++)
-           {
-            if(r[i].high > pHi) pHi = r[i].high;
-            if(r[i].low  < pLo) pLo = r[i].low;
-           }
-         pOk = true;
-        }
-
-      bool bear = (upperW >= m_fuWickFrac) && pOk &&
-                  ((b.high >= pHi && b.close < pHi) || (b.close < b.open && b.high >= pHi));
-      bool bull = (lowerW >= m_fuWickFrac) && pOk &&
-                  ((b.low  <= pLo && b.close > pLo) || (b.close > b.open && b.low  <= pLo));
-      if(!bear && !bull) return;
-
-      string id = N("FU_" + IntegerToString((int)b.time));
-      if(ObjectFind(0, id) >= 0) return;  // already marked
-
-      ObjectCreate(0, id, OBJ_ARROW, 0, b.time, bull ? b.low : b.high);
-      ObjectSetInteger(0, id, OBJPROP_ARROWCODE, bull ? 233 : 234);
-      ObjectSetInteger(0, id, OBJPROP_COLOR, bull ? m_bull : m_warn);
-      ObjectSetInteger(0, id, OBJPROP_ANCHOR, bull ? ANCHOR_TOP : ANCHOR_BOTTOM);
-      ObjectSetInteger(0, id, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, id, OBJPROP_HIDDEN, true);
-      ObjectSetString (0, id, OBJPROP_TOOLTIP, bull ? "FU bull" : "FU bear");
-     }
-  };
-
-#endif // __OMEGA_CHART_MQH__
-
-//-- Phase 5.5: chart instance is a single global (declared early so any
-//   class method below can reference it). Init/Update/Deinit are wired
-//   from the EA lifecycle handlers.
-OmegaChart g_chart;
-//-- Phase 5.5: track last decision so the HUD can show what the engine just did
-ENUM_OMEGA_DECISION g_lastDecision = OMEGA_DEC_OBSERVE;
-ENUM_OMEGA_REASON   g_lastReason   = REASON_PHASE_NOT_BUILT;
-
 
 //==================================================================
 //= MODULE: Participant/ParticipantZone
@@ -5100,11 +4398,191 @@ public:
 #define __OMEGA_NARRATIVE_ALIGNMENT_MQH__
 
 
-class Alignment
+//=== Phase 5.5.3 — CANONICAL ALIGNMENT (per F72 spec) =============
+//
+//   THIS REPLACES THE FORBIDDEN TIMEFRAME-COUNT MODEL.
+//
+//   Per the canonical spec: alignment measures NARRATIVE COHERENCE
+//   (the quality of relationships between curves), NOT directional
+//   agreement (counting how many TFs point the same way).
+//
+//   Children are EXPECTED to oppose parents. Lower curves rotating
+//   against higher curves IS the curve tree at work — not noise to
+//   filter. The forbidden patterns:
+//
+//      aligned_tf_count                FORBIDDEN
+//      same_direction_count            FORBIDDEN
+//      "4/6 timeframes agree"          FORBIDDEN
+//
+//   Alignment is computed from the seven RELATIONSHIP signals plus a
+//   contradiction penalty. Weights match the spec exactly:
+//
+//      Ownership Support       15%
+//      Compression Persistence 15%
+//      Force Quality           10%
+//      Chain Vitality          15%
+//      Parent Campaign Health  15%
+//      Progression Support     15%
+//      Transfer Probability    10%   (inverted: low risk = high score)
+//      Contradiction          neg.   (subtracted from total)
+//
+//   Outputs the seven component scores PLUS the weighted total. The
+//   HUD shows each component's pass/fail (≥50) so the trader can see
+//   which relationship is dragging the story.
+//==================================================================
+class NarrativeAlignment
   {
 public:
-   //--- count of TFs sharing the reference dir (0..6)
-   static int CountAligned(const OmegaCurve &curve, int refDir)
+   struct Components
+     {
+      double ownership;        // 0..100
+      double compression;      // 0..100
+      double force;            // 0..100
+      double chain;            // 0..100
+      double parent;           // 0..100
+      double progression;      // 0..100
+      double transfer;         // 0..100 (high = low transfer risk)
+      double contradiction;    // 0..100 (subtracted from total)
+      double total;            // 0..100 final narrative alignment
+     };
+
+   //--- Compute the seven relationship scores plus contradiction.
+   //    `narrScore` is the narrative-progression score from the
+   //    NarrativeScore module (so we don't double-iterate the lineage).
+   static Components Compute(const OmegaState &state, const OmegaCurve &curve, double narrScore)
+     {
+      Components c;
+
+      //=== 1. Ownership Support (15%) ============================
+      //   Current owner alive, energy strong, no recent transfer.
+      c.ownership = 25.0;  // baseline if no owner
+      int oi = curve.tree.ownerIndex;
+      if(oi >= 0)
+        {
+         if(curve.tree.tree[oi].alive)
+           {
+            c.ownership = 30.0 + curve.tree.tree[oi].energy * 0.7;  // 30..100
+            //-- penalise recent ownership churn
+            if(curve.tree.transfersCount > 0)
+               c.ownership -= MathMin(20.0, (double)curve.tree.transfersCount * 4.0);
+           }
+         else
+            c.ownership = 12.0;  // owner dead — relationship broken
+        }
+
+      //=== 2. Compression Persistence (15%) =====================
+      //   The retracement compressing tighter == narrative supports
+      //   continuation. Already 0..100 in supporting.compression.
+      c.compression = state.supporting.compression;
+
+      //=== 3. Force Quality (10%) ===============================
+      c.force = state.supporting.forceScore;
+
+      //=== 4. Chain Vitality (15%) ==============================
+      c.chain = state.supporting.chainHealth;
+
+      //=== 5. Parent Campaign Health (15%) ======================
+      //   Find the owner's parent in the tree; score by parent.energy.
+      //   If owner IS the root, parent-equivalent = own life (the
+      //   owner's energy reflects parent-campaign health by proxy).
+      c.parent = 50.0;
+      if(oi >= 0)
+        {
+         long pid = curve.tree.tree[oi].parentId;
+         if(pid < 0)
+           {
+            //-- owner is root; parent health == its own life
+            c.parent = 35.0 + curve.tree.tree[oi].energy * 0.65;
+           }
+         else
+           {
+            for(int j = 0; j < curve.tree.count; j++)
+              {
+               if(curve.tree.tree[j].id == pid)
+                 {
+                  if(curve.tree.tree[j].alive)
+                     c.parent = 30.0 + curve.tree.tree[j].energy * 0.7;
+                  else
+                     c.parent = 15.0;  // parent dead — child orphaned
+                  break;
+                 }
+              }
+           }
+        }
+
+      //=== 6. Progression Support (15%) =========================
+      //   Successive curves supporting continuation? Use the
+      //   narrative score (positive direction of campaign building).
+      c.progression = OmegaMath::Clamp(narrScore, 0.0, 100.0);
+
+      //=== 7. Transfer Probability (10%) — INVERTED =============
+      //   Low transfer probability == high relationship support.
+      double transferRisk = state.supporting.pTransfer;
+      c.transfer = 100.0 - OmegaMath::Clamp(transferRisk, 0.0, 100.0);
+
+      //=== 8. Contradiction (negative weight) ===================
+      //   Structural contradictions that undermine narrative
+      //   coherence — these REDUCE total alignment.
+      c.contradiction = 0.0;
+      //-- ownership weak AND life dropping
+      if(state.life < 35.0 && oi >= 0)              c.contradiction += 18.0;
+      //-- engine primed but no owning curve
+      if(state.primed && oi < 0)                    c.contradiction += 22.0;
+      //-- chain decaying
+      if(state.supporting.chainHealth < 30.0)       c.contradiction += 14.0;
+      //-- transfer probability dominating
+      if(transferRisk > 60.0)                       c.contradiction += 14.0;
+      //-- owner dead (already partly captured but emphasise)
+      if(oi >= 0 && !curve.tree.tree[oi].alive)     c.contradiction += 16.0;
+
+      //=== weighted sum ==========================================
+      double sum =
+           c.ownership   * 0.15
+         + c.compression * 0.15
+         + c.force       * 0.10
+         + c.chain       * 0.15
+         + c.parent      * 0.15
+         + c.progression * 0.15
+         + c.transfer    * 0.10
+         - c.contradiction;
+      c.total = OmegaMath::Clamp(sum, 0.0, 100.0);
+      return c;
+     }
+
+   //--- Just the score (when components aren't needed).
+   static double Score(const OmegaState &state, const OmegaCurve &curve, double narrScore)
+     {
+      Components c = Compute(state, curve, narrScore);
+      return c.total;
+     }
+
+   //--- Narrative-coherence story label (replaces TF-count Story).
+   static string Story(double na, int ownerDir)
+     {
+      if(ownerDir == 0)        return "no owning curve";
+      if(na >= 80.0)           return "story coherent · curve alignment supports continuation";
+      if(na >= 65.0)           return "story holding · relationships supportive";
+      if(na >= 50.0)           return "story mixed · some relationships dragging";
+      if(na >= 35.0)           return "story weakening · structural contradiction building";
+      return "story incoherent · relationships broken";
+     }
+
+   //--- Per-TF dir snapshot for INFO display only (HUD MTF map).
+   //    This is rendering data, never a gate. Use to draw arrows in
+   //    the MTF panel — children opposing parents is normal.
+   static string TfRow(const OmegaCurve &curve)
+     {
+      return StringFormat("M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d",
+                          curve.tfM1.DirByOrigin(),  curve.tfM3.DirByOrigin(),
+                          curve.tfM5.DirByOrigin(),  curve.tfM15.DirByOrigin(),
+                          curve.tfH1.DirByOrigin(),  curve.tfH4.DirByOrigin());
+     }
+
+   //--- INFORMATIONAL TF count — exposed only for display rendering
+   //    (e.g., HUD shows "3 of 6 same dir as owner — child rotation").
+   //    NEVER USED FOR DECISIONS. Calling it from any gate path is
+   //    a violation of the canonical alignment spec.
+   static int InfoTfCountSameDir(const OmegaCurve &curve, int refDir)
      {
       if(refDir == 0) return 0;
       int n = 0;
@@ -5116,39 +4594,9 @@ public:
       if(curve.tfH4.DirByOrigin()  == refDir) n++;
       return n;
      }
-
-   //--- 0..100 — fractal stack agreement
-   static double Score(int alignedCount) { return (alignedCount / 6.0) * 100.0; }
-
-   //--- HTF agreement (H1 + H4)
-   static int CountHTFAligned(const OmegaCurve &curve, int refDir)
-     {
-      if(refDir == 0) return 0;
-      int n = 0;
-      if(curve.tfH1.DirByOrigin() == refDir) n++;
-      if(curve.tfH4.DirByOrigin() == refDir) n++;
-      return n;
-     }
-
-   //--- Cross-TF story (mirrors the Pine MTF map labels)
-   static string Story(int alignedCount, int refDir)
-     {
-      if(refDir == 0)            return "no dominant owner";
-      if(alignedCount >= 5)      return "all TFs aligned → strong continuation";
-      if(alignedCount == 4)      return "HTFs lead · LTFs following";
-      if(alignedCount <= 2)      return "LTFs counter HTF → pullback / transition";
-      return "mixed → rotation";
-     }
-
-   //--- Per-TF dir snapshot for explainability
-   static string TfRow(const OmegaCurve &curve)
-     {
-      return StringFormat("M1:%d M3:%d M5:%d M15:%d H1:%d H4:%d",
-                          curve.tfM1.DirByOrigin(),  curve.tfM3.DirByOrigin(),
-                          curve.tfM5.DirByOrigin(),  curve.tfM15.DirByOrigin(),
-                          curve.tfH1.DirByOrigin(),  curve.tfH4.DirByOrigin());
-     }
   };
+
+//=== legacy alias removed — Alignment class deleted (TF-count) ====
 
 #endif // __OMEGA_NARRATIVE_ALIGNMENT_MQH__
 
@@ -5515,7 +4963,14 @@ public:
    double            lastStability;
    double            lastConfidence;
    int               bias;             // -1 / 0 / +1
-   int               alignedCount;
+   //--- Phase 5.5.3 — narrative alignment (replaces TF-count alignedCount)
+   //    The full component breakdown is exposed so the HUD can show
+   //    each relationship's pass/fail. naScore is the weighted total.
+   NarrativeAlignment::Components naComp;
+   double            naScore;
+   //    InfoTfCount is the per-TF dir count vs owner — INFO ONLY,
+   //    rendered in HUD/log but never used for decisions.
+   int               infoTfCount;
    string            crossTfStory;
    ENUM_LIFE_VERDICT lifeVerdict;
    double            retrX;
@@ -5530,7 +4985,7 @@ public:
                      OmegaStory()
      {
       lastLife = lastStability = lastConfidence = OMEGA_TRINITY_NEUTRAL;
-      bias = 0; alignedCount = 0;
+      bias = 0; naScore = 0.0; infoTfCount = 0; ZeroMemory(naComp);
       crossTfStory = "—";
       lifeVerdict = LIFE_DEAD;
       retrX = 50.0;
@@ -5552,7 +5007,7 @@ public:
       narrative.Reset();
       confidence.Reset();
       lastLife = lastStability = lastConfidence = OMEGA_TRINITY_NEUTRAL;
-      bias = 0; alignedCount = 0;
+      bias = 0; naScore = 0.0; infoTfCount = 0; ZeroMemory(naComp);
       crossTfStory = "—";
       lifeVerdict = LIFE_DEAD;
       retrX = 50.0;
@@ -5615,11 +5070,21 @@ public:
       narrative.Update(ownerDir, ownerOrigin, bar1High, bar1Low, bar1Close, li.cmpTighten);
       double narrScore = narrative.Score();
 
-      //=== 4. alignment =============================================
+      //=== 4. alignment — NARRATIVE COHERENCE (Phase 5.5.3) =========
+      //   Replaces the deleted TF-count Alignment. Computes weighted
+      //   relationship score from ownership / compression / force /
+      //   chain / parent / progression / transfer-risk minus
+      //   contradiction. TF DIRECTION COUNTING IS FORBIDDEN here per
+      //   the canonical alignment spec — children rotating against
+      //   parents is the curve tree at work, not noise.
       bias = ownerDir;
-      alignedCount = Alignment::CountAligned(curve, bias);
-      double alignScore = Alignment::Score(alignedCount);
-      crossTfStory = Alignment::Story(alignedCount, bias);
+      naComp = NarrativeAlignment::Compute(state, curve, narrScore);
+      double alignScore = naComp.total;
+      naScore = alignScore;
+      crossTfStory = NarrativeAlignment::Story(alignScore, bias);
+      //   Informational only — what the per-TF directions LOOK like
+      //   right now (rendered in HUD MTF panel). Never gates a trade.
+      infoTfCount = NarrativeAlignment::InfoTfCountSameDir(curve, bias);
 
       //=== 5. stability (Layer 3 fold: alignment + narrative + regime) =====
       //   Phase 4: regime stays neutral (Phase 6 will populate).
@@ -5663,10 +5128,13 @@ public:
    string Snapshot() const
      {
       return StringFormat(
-         "L=%.1f(%s) S=%.1f C=%.1f bias=%d align=%d/6 retrX=%.0f%% prog=%s budget=%s · %s · cross=\"%s\"",
+         "L=%.1f(%s) S=%.1f C=%.1f bias=%d narr-align=%.0f%% (own=%.0f cmp=%.0f frc=%.0f chn=%.0f par=%.0f prg=%.0f xfer=%.0f cnt=%.0f) info-tf=%d/6 retrX=%.0f%% prog=%s budget=%s · %s · cross=\"%s\"",
          lastLife, LifeScore::VerdictString(lifeVerdict),
          lastStability, lastConfidence,
-         bias, alignedCount, retrX,
+         bias, naScore,
+         naComp.ownership, naComp.compression, naComp.force, naComp.chain,
+         naComp.parent, naComp.progression, naComp.transfer, naComp.contradiction,
+         infoTfCount, retrX,
          progressing ? "Y" : "N",
          recursionComplete ? "DONE" : "LEFT",
          narrative.Snapshot(), crossTfStory);
@@ -5684,6 +5152,708 @@ public:
   };
 
 #endif // __OMEGA_NARRATIVE_STORY_MQH__
+//==================================================================
+//= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
+//= Source: Include/Chart.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                        Chart.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|  See what the engine is seeing and doing — directly on the chart |
+//|  it's attached to. Every visual is a native MT5 chart object     |
+//|  (OBJ_RECTANGLE_LABEL, OBJ_LABEL, OBJ_RECTANGLE, OBJ_TREND,      |
+//|  OBJ_ARROW, OBJ_TEXT). All names share a magic-prefix so cleanup |
+//|  on Deinit is bulletproof.                                       |
+//|                                                                  |
+//|  The chart layer reads the same Trinity + curve tree + per-tier  |
+//|  state that the trading engine reads — it is a pure observer.    |
+//|  It can never affect a decision.                                 |
+//|                                                                  |
+//|  Layout:                                                         |
+//|    HUD panel (top-left)         — Trinity bars · tier · verdict  |
+//|    MTF map (top-right)          — per-TF direction + state       |
+//|    Owner-curve box (price)      — origin→extreme rectangle       |
+//|    Budget-target arrow (price)  — current px → owner.extreme     |
+//|    FU spike marks (chart bars)  — rejection-wick detector        |
+//|    Position labels (entry bars) — tier · int · act risk          |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_CHART_MQH__
+#define __OMEGA_CHART_MQH__
+
+class OmegaChart
+  {
+private:
+   string  m_prefix;
+   bool    m_enabled;
+   bool    m_drawHUD;
+   bool    m_drawMTF;
+   bool    m_drawOwner;
+   bool    m_drawFlip;
+   bool    m_drawBudget;
+   bool    m_drawFU;
+   bool    m_drawPositions;
+   int     m_hudCorner;          // CORNER_LEFT_UPPER etc.
+   int     m_hudX, m_hudY;
+   int     m_mtfCorner;
+   int     m_mtfX, m_mtfY;
+   int     m_lineHeight;         // pixels per HUD row
+   int     m_hudWidth;           // px
+   int     m_mtfWidth;           // px
+   color   m_bg;
+   color   m_fg;
+   color   m_dim;
+   color   m_bull;
+   color   m_bear;
+   color   m_warn;
+   double  m_fuWickFrac;
+   int     m_fuLookback;
+   int     m_minAlign;            // legacy — kept for an info-only TF count row
+   double  m_narrAlignMin;        // 65 — canonical gate threshold
+   long    m_lastOwnerId;
+   datetime m_lastOwnerTime;
+   int     m_posCounter;         // monotonic for position-marker names
+
+   //--- Object name helpers
+   string N(string sub) const { return m_prefix + "_" + sub; }
+
+   void DelByPrefix(string sub)
+     {
+      string match = m_prefix + "_" + sub;
+      int total = ObjectsTotal(0, -1, -1);
+      for(int i = total - 1; i >= 0; i--)
+        {
+         string name = ObjectName(0, i, -1, -1);
+         if(StringFind(name, match) == 0) ObjectDelete(0, name);
+        }
+     }
+
+   //--- Pixel-anchored label (HUD/MTF). Always set ANCHOR + corner so
+   //    the panel sticks to the configured corner regardless of zoom.
+   void EnsureLabel(string name, int corner, int x, int y, string txt,
+                    color clr, int sz = 9, string font = "Consolas")
+     {
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetString (0, name, OBJPROP_TEXT,      txt);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
+      ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  sz);
+      ObjectSetString (0, name, OBJPROP_FONT,      font);
+      ObjectSetInteger(0, name, OBJPROP_BACK,      false);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
+     }
+
+   //--- Pixel-anchored rectangle background (HUD frame).
+   void EnsureRectLabel(string name, int corner, int x, int y, int w, int h,
+                         color bg, color border)
+     {
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_CORNER,    corner);
+      ObjectSetInteger(0, name, OBJPROP_ANCHOR,    ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+      ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+      ObjectSetInteger(0, name, OBJPROP_XSIZE,     w);
+      ObjectSetInteger(0, name, OBJPROP_YSIZE,     h);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR,   bg);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, name, OBJPROP_COLOR,     border);
+      ObjectSetInteger(0, name, OBJPROP_BACK,      true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN,    true);
+     }
+
+   //--- Generic 0..100 ASCII bar (10 cells) — visible without unicode tricks.
+   string GaugeBar(double v) const
+     {
+      v = MathMax(0.0, MathMin(100.0, v));
+      int filled = (int)MathRound(v / 10.0);
+      string s = "[";
+      for(int i = 0; i < 10; i++) s += (i < filled) ? "#" : ".";
+      s += "]";
+      return s;
+     }
+
+   //--- TF arrow glyph
+   string DirArrow(int d) const { return d == 1 ? "^" : d == -1 ? "v" : "-"; }
+   color  DirColor(int d) const { return d == 1 ? m_bull : d == -1 ? m_bear : m_dim; }
+
+public:
+                     OmegaChart()
+     {
+      m_prefix = "OMEGA";
+      m_enabled = true;
+      m_drawHUD = true;
+      m_drawMTF = true;
+      m_drawOwner = true;
+      m_drawFlip = true;
+      m_drawBudget = true;
+      m_drawFU = true;
+      m_drawPositions = true;
+      m_hudCorner = CORNER_LEFT_UPPER;
+      m_hudX = 8;  m_hudY = 24;
+      m_mtfCorner = CORNER_RIGHT_UPPER;
+      m_mtfX = 8;  m_mtfY = 24;
+      m_lineHeight = 14;
+      m_hudWidth = 280;
+      m_mtfWidth = 220;
+      m_bg   = (color)0x0A0E27;
+      m_fg   = (color)0xD7FAFF;
+      m_dim  = (color)0x94A3B8;
+      m_bull = (color)0x34D399;
+      m_bear = (color)0x6285FB;     // BGR for #FB7185
+      m_warn = (color)0x24BFFB;     // BGR for #FBBF24
+      m_fuWickFrac = 0.30;
+      m_fuLookback = 5;
+      m_minAlign   = 4;
+      m_narrAlignMin = 65.0;
+      m_lastOwnerId = -1;
+      m_lastOwnerTime = 0;
+      m_posCounter = 0;
+     }
+
+   void Init(string prefix, bool enabled,
+             bool drawHUD, bool drawMTF, bool drawOwner, bool drawFlip, bool drawBudget,
+             bool drawFU,  bool drawPositions,
+             double fuWickFrac = 0.30, int fuLookback = 5)
+     {
+      m_prefix         = (StringLen(prefix) > 0) ? prefix : "OMEGA";
+      m_enabled        = enabled;
+      m_drawHUD        = drawHUD;
+      m_drawMTF        = drawMTF;
+      m_drawOwner      = drawOwner;
+      m_drawFlip       = drawFlip;
+      m_drawBudget     = drawBudget;
+      m_drawFU         = drawFU;
+      m_drawPositions  = drawPositions;
+      m_fuWickFrac     = fuWickFrac;
+      m_fuLookback     = fuLookback;
+      OmegaLogger::LogInfo("CHART",
+         StringFormat("Init · enabled=%s · HUD=%s MTF=%s owner=%s flip=%s budget=%s FU=%s pos=%s · prefix=%s",
+                      enabled ? "YES" : "NO",
+                      drawHUD ? "Y" : "N", drawMTF ? "Y" : "N", drawOwner ? "Y" : "N",
+                      drawFlip ? "Y" : "N", drawBudget ? "Y" : "N",
+                      drawFU ? "Y" : "N", drawPositions ? "Y" : "N",
+                      m_prefix));
+     }
+
+   void Deinit()
+     {
+      // sweep every object whose name starts with the magic prefix
+      string match = m_prefix + "_";
+      int total = ObjectsTotal(0, -1, -1);
+      for(int i = total - 1; i >= 0; i--)
+        {
+         string name = ObjectName(0, i, -1, -1);
+         if(StringFind(name, match) == 0) ObjectDelete(0, name);
+        }
+      ChartRedraw(0);
+     }
+
+   //--- Phase 5.5 — wire the entry-alignment gate from EA inputs so the
+   //    HUD's gate line stays in sync with the decision engine.
+   void SetEntryGates(int minAlign) { m_minAlign = minAlign; }
+
+   //--- Phase 5.5.3 — wire the canonical narrative-coherence floor.
+   //    The gate line lights green only when state.supporting.alignment
+   //    (NarrativeAlignment::Compute total) is >= this threshold.
+   void SetNarrativeAlignMin(double v) { m_narrAlignMin = v; }
+
+   //--- Per-tick update (called from EA OnTick).
+   void Update(const OmegaState &state, OmegaCurve &curve,
+               OmegaRisk &risk, OmegaCapital &capital,
+               OmegaStory &story,
+               ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
+     {
+      if(!m_enabled) return;
+
+      ENUM_OMEGA_TIER tier = risk.TierForCap(capital);
+      double effEq = risk.EffectiveEquity(capital);
+
+      if(m_drawHUD)    UpdateHUD(state, curve, story, tier, risk, effEq, lastDec, lastReason);
+      if(m_drawMTF)    UpdateMTFMap(curve);
+      if(m_drawOwner)  UpdateOwnerBox(curve);
+      if(m_drawFlip)   UpdateFlipZone(curve);
+      if(m_drawBudget) UpdateBudgetTarget(curve);
+      if(m_drawFU)     UpdateFUMarks();
+
+      ChartRedraw(0);
+     }
+
+   //--- Called from CampaignPositions::Open after a successful entry.
+   //    Drops a marker arrow + label at the bar where the trade fired.
+   void OnPositionOpen(string symbol, ulong ticket, int direction,
+                        double openPx, double sl,
+                        ENUM_OMEGA_TIER tier, double intendedPct, double actualPct,
+                        double lots, string detail)
+     {
+      if(!m_enabled || !m_drawPositions) return;
+      m_posCounter++;
+      string an = N("POS_ARR_" + IntegerToString(m_posCounter));
+      string ln = N("POS_LBL_" + IntegerToString(m_posCounter));
+      datetime t = TimeCurrent();
+      color c = (direction == 1) ? m_bull : m_bear;
+
+      if(ObjectFind(0, an) < 0) ObjectCreate(0, an, OBJ_ARROW, 0, t, openPx);
+      ObjectSetInteger(0, an, OBJPROP_ARROWCODE, direction == 1 ? 233 : 234);  // up/down arrows
+      ObjectSetInteger(0, an, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, an, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, an, OBJPROP_BACK,  false);
+      ObjectSetInteger(0, an, OBJPROP_HIDDEN,true);
+      ObjectSetString (0, an, OBJPROP_TOOLTIP,
+         StringFormat("%s #%I64u · %.2f lots @ %.5f · SL %.5f · int %.2f%% act %.2f%%",
+                       direction == 1 ? "BUY" : "SELL", ticket, lots, openPx, sl,
+                       intendedPct, actualPct));
+
+      string txt = StringFormat("%s %.2f", direction == 1 ? "B" : "S", lots);
+      if(ObjectFind(0, ln) < 0) ObjectCreate(0, ln, OBJ_TEXT, 0, t, openPx);
+      ObjectSetString (0, ln, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, ln, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, ln, OBJPROP_FONTSIZE, 8);
+      ObjectSetString (0, ln, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, ln, OBJPROP_ANCHOR,
+                        direction == 1 ? ANCHOR_UPPER : ANCHOR_LOWER);
+      ObjectSetInteger(0, ln, OBJPROP_HIDDEN, true);
+     }
+
+private:
+   //=== HUD =========================================================
+   void UpdateHUD(const OmegaState &s, OmegaCurve &curve, OmegaStory &story,
+                  ENUM_OMEGA_TIER tier, OmegaRisk &risk, double effEq,
+                  ENUM_OMEGA_DECISION lastDec, ENUM_OMEGA_REASON lastReason)
+     {
+      int rows = 18;
+      int W = m_hudWidth;
+      int H = m_lineHeight * rows + 14;
+      int X = m_hudX;
+      int Y = m_hudY;
+      // background frame
+      EnsureRectLabel(N("HUD_BG"), m_hudCorner, X, Y, W, H, m_bg, m_dim);
+
+      int row = 0;
+      int rx = X + 8;
+      int ry = Y + 8;
+
+      // Per-tier conviction floors
+      double minLife = risk.TierMinLife(tier);
+      double minStab = risk.TierMinStab(tier);
+      double minConf = risk.TierMinConf(tier);
+
+      bool lifeOK = (s.life       >= minLife);
+      bool stabOK = (s.stability  >= minStab);
+      bool confOK = (s.confidence >= minConf);
+
+      // Phase 5.5.3 — narrative-coherence gate (canonical)
+      double naScore  = s.supporting.alignment;       // 0..100 (Story has overwritten)
+      bool   naOK     = (naScore >= m_narrAlignMin);
+
+      // Title
+      EnsureLabel(N("HUD_TITLE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   "F72 OMEGA  ·  v" + OMEGA_VERSION, m_fg, 10, "Consolas");
+      row++;
+
+      // Tier line
+      string tierLine = StringFormat("Tier %s  ·  eq %.2f  ·  cap %.2f%%  ·  pyr %d",
+                                     risk.TierStr(tier), effEq,
+                                     risk.TierMaxRiskPct(tier),
+                                     risk.TierMaxBudget(tier));
+      color tcol = (tier == TIER_MICRO) ? m_warn :
+                   (tier == TIER_SMALL) ? m_warn : m_fg;
+      EnsureLabel(N("HUD_TIER"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   tierLine, tcol);
+      row++;
+
+      // Trinity bars — each shows value, gauge, tier floor, pass/fail mark
+      string lifeStr = StringFormat("life  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.life), s.life, minLife,
+                                     lifeOK ? "OK" : "X");
+      string stabStr = StringFormat("stab  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.stability), s.stability, minStab,
+                                     stabOK ? "OK" : "X");
+      string confStr = StringFormat("conf  %s %5.1f  >=%.0f  %s",
+                                     GaugeBar(s.confidence), s.confidence, minConf,
+                                     confOK ? "OK" : "X");
+      EnsureLabel(N("HUD_LIFE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   lifeStr, lifeOK ? m_bull : m_bear);
+      row++;
+      EnsureLabel(N("HUD_STAB"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   stabStr, stabOK ? m_bull : m_bear);
+      row++;
+      EnsureLabel(N("HUD_CONF"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   confStr, confOK ? m_bull : m_bear);
+      row++;
+
+      // Narrative Alignment — the canonical relationship-coherence gate.
+      string naLine = StringFormat("Narrative Align %s %5.1f  >=%.0f  %s",
+                                    GaugeBar(naScore), naScore, m_narrAlignMin,
+                                    naOK ? "OK" : "X");
+      EnsureLabel(N("HUD_NA"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   naLine, naOK ? m_bull : m_bear);
+      row++;
+
+      // Narrative components (each ✓ if >=50, × if below)
+      // The HUD shows the relationships behind the score so the trader
+      // can see WHICH relationship is dragging coherence.
+      WriteComponent(N("HUD_C_OWN"), rx, ry, row, "  Ownership      ", story.naComp.ownership);    row++;
+      WriteComponent(N("HUD_C_CMP"), rx, ry, row, "  Compression    ", story.naComp.compression);  row++;
+      WriteComponent(N("HUD_C_FRC"), rx, ry, row, "  Force          ", story.naComp.force);        row++;
+      WriteComponent(N("HUD_C_CHN"), rx, ry, row, "  Chain Vitality ", story.naComp.chain);        row++;
+      WriteComponent(N("HUD_C_PAR"), rx, ry, row, "  Parent Health  ", story.naComp.parent);       row++;
+      WriteComponent(N("HUD_C_PRG"), rx, ry, row, "  Progression    ", story.naComp.progression);  row++;
+      WriteComponent(N("HUD_C_XFR"), rx, ry, row, "  Transfer Risk  ", story.naComp.transfer);     row++;
+      // contradiction inverted — × if HIGH (>20), ✓ if LOW
+      string ctxt = StringFormat("  Contradiction  %5.1f  %s",
+                                  story.naComp.contradiction,
+                                  story.naComp.contradiction <= 20.0 ? "OK" : "X");
+      EnsureLabel(N("HUD_C_CON"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   ctxt, story.naComp.contradiction <= 20.0 ? m_bull : m_bear);
+      row++;
+
+      // Owner curve
+      int oidx = curve.tree.ownerIndex;
+      int oDir = (oidx >= 0) ? curve.tree.tree[oidx].dir : 0;
+      double oNrg = (oidx >= 0) ? curve.tree.tree[oidx].energy : 0.0;
+      string oState = (oidx >= 0) ? curve.tree.tree[oidx].state : "—";
+      int oDepth   = (oidx >= 0) ? curve.tree.tree[oidx].depth : 0;
+      string ownLine = StringFormat("owner %s  d%d  e%4.1f  %s",
+                                     DirArrow(oDir), oDepth, oNrg, oState);
+      EnsureLabel(N("HUD_OWNER"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   ownLine, DirColor(oDir));
+      row++;
+
+      // Verdict (last decision)
+      string verdict = OmegaStr::DecisionToString(lastDec);
+      color vcol = (lastDec == OMEGA_DEC_ENTER_LONG || lastDec == OMEGA_DEC_ENTER_SHORT
+                     || lastDec == OMEGA_DEC_ADD || lastDec == OMEGA_DEC_REVERSE) ? m_bull
+                  : (lastDec == OMEGA_DEC_EXIT || lastDec == OMEGA_DEC_REDUCE) ? m_warn
+                  : m_dim;
+      string vline = "verdict " + verdict + "  ·  " + OmegaStr::ReasonToString(lastReason);
+      EnsureLabel(N("HUD_VERD"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   vline, vcol);
+      row++;
+
+      // Story label (canonical narrative coherence)
+      string storyLine = "story  " + story.crossTfStory;
+      EnsureLabel(N("HUD_STORY"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   storyLine, m_dim);
+      row++;
+
+      // GATE line — explicit summary. Real gates only:
+      //   1. owner present
+      //   2. Trinity floors (life/stab/conf per tier)
+      //   3. Narrative alignment >= threshold (relationship coherence)
+      // NEVER timeframe count.
+      string gate = "";
+      bool   ownerOK = (curve.tree.ownerIndex >= 0 && oDir != 0);
+      if(!s.primed)         gate = "WARMUP — perception not primed yet";
+      else
+        {
+         string blockers = "";
+         if(!ownerOK) blockers += "no owning curve  ";
+         if(!lifeOK)  blockers += StringFormat("life %.0f<%.0f  ", s.life,       minLife);
+         if(!stabOK)  blockers += StringFormat("stab %.0f<%.0f  ", s.stability,  minStab);
+         if(!confOK)  blockers += StringFormat("conf %.0f<%.0f  ", s.confidence, minConf);
+         if(!naOK)    blockers += StringFormat("narr-align %.0f<%.0f  ", naScore, m_narrAlignMin);
+         if(StringLen(blockers) == 0) gate = "GATES OPEN — entry eligible";
+         else                          gate = "BLOCKED  " + blockers;
+        }
+      bool gateOpen = (StringFind(gate, "OPEN") == 0);
+      EnsureLabel(N("HUD_GATE"), m_hudCorner, rx, ry + row * m_lineHeight,
+                   gate, gateOpen ? m_bull : m_bear);
+      row++;
+     }
+
+   //--- Helper for narrative-component rows. Pass/fail at >=50.
+   void WriteComponent(string name, int rx, int ry, int row, string label, double value)
+     {
+      bool ok = (value >= 50.0);
+      string s = StringFormat("%s%5.1f  %s", label, value, ok ? "OK" : "X");
+      EnsureLabel(name, m_hudCorner, rx, ry + row * m_lineHeight,
+                   s, ok ? m_bull : m_bear);
+     }
+
+   //=== MTF Map =====================================================
+   void UpdateMTFMap(OmegaCurve &curve)
+     {
+      int rows = 8;
+      int W = m_mtfWidth;
+      int H = m_lineHeight * rows + 14;
+      int X = m_mtfX;
+      int Y = m_mtfY;
+      EnsureRectLabel(N("MTF_BG"), m_mtfCorner, X, Y, W, H, m_bg, m_dim);
+
+      int row = 0;
+      int rx = X + 8;
+      int ry = Y + 8;
+
+      EnsureLabel(N("MTF_TITLE"), m_mtfCorner, rx, ry + row * m_lineHeight,
+                   "MTF CURVE MAP", m_fg, 10, "Consolas");
+      row++;
+
+      // Per-TF row helper. CurveState exposes its direction via .currentDir
+      // and the emergent state via .narrative or similar — we use the
+      // public Snapshot() string fallback if needed.
+      WriteTFRow(N("MTF_M1"),  curve.tfM1,  "M1",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_M5"),  curve.tfM5,  "M5",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_M15"), curve.tfM15, "M15", rx, ry, row); row++;
+      WriteTFRow(N("MTF_H1"),  curve.tfH1,  "H1",  rx, ry, row); row++;
+      WriteTFRow(N("MTF_H4"),  curve.tfH4,  "H4",  rx, ry, row); row++;
+
+      // Alignment summary
+      int a = AlignmentCount(curve);
+      string al = StringFormat("aligned %d / 5", a);
+      color  ac = (a >= 4) ? m_bull : (a <= 2) ? m_bear : m_warn;
+      EnsureLabel(N("MTF_ALIGN"), m_mtfCorner, rx, ry + row * m_lineHeight,
+                   al, ac);
+     }
+
+   void WriteTFRow(string name, CurveState &tf, string lbl, int rx, int ry, int row)
+     {
+      int d = tf.dir;
+      // Inline emergent state name from CurveState's composite scores.
+      string ph;
+      if(!tf.ready)                         ph = "warmup";
+      else if(tf.compIdx     >= 60.0)       ph = "compress";
+      else if(tf.absScore    >= 60.0)       ph = "absorb";
+      else if(tf.expScore    >= 60.0)       ph = "expand";
+      else if(tf.convScore   >= 60.0)       ph = "convex";
+      else if(tf.waveProgress >= 75.0)      ph = "mature";
+      else                                  ph = "forming";
+      string s = StringFormat("%-3s %s  %s", lbl, DirArrow(d), ph);
+      EnsureLabel(name, m_mtfCorner, rx, ry + row * m_lineHeight,
+                   s, DirColor(d));
+     }
+
+   int AlignmentCount(OmegaCurve &curve)
+     {
+      // Count TFs whose direction matches the chart-TF direction.
+      CurveState *chart = curve.ChartTfState();
+      if(chart == NULL) return 0;
+      int ref = chart.dir;
+      if(ref == 0) return 0;
+      int n = 0;
+      if(curve.tfM1.dir  == ref) n++;
+      if(curve.tfM5.dir  == ref) n++;
+      if(curve.tfM15.dir == ref) n++;
+      if(curve.tfH1.dir  == ref) n++;
+      if(curve.tfH4.dir  == ref) n++;
+      return n;
+     }
+
+   //=== Owner curve box =============================================
+   void UpdateOwnerBox(OmegaCurve &curve)
+     {
+      int oidx = curve.tree.ownerIndex;
+      string name = N("OWNERBOX");
+      string lblName = N("OWNERLBL");
+      if(oidx < 0)
+        {
+         if(ObjectFind(0, name)    >= 0) ObjectDelete(0, name);
+         if(ObjectFind(0, lblName) >= 0) ObjectDelete(0, lblName);
+         return;
+        }
+      CurveNode owner = curve.tree.tree[oidx];
+      if(!owner.alive || owner.origin <= 0 || owner.extreme <= 0) return;
+
+      datetime t1 = (owner.birthTime > 0) ? owner.birthTime : TimeCurrent() - 3600 * 24;
+      datetime t2 = TimeCurrent();
+      double hi = MathMax(owner.origin, owner.extreme);
+      double lo = MathMin(owner.origin, owner.extreme);
+      color  c  = (owner.dir == 1) ? m_bull : (owner.dir == -1) ? m_bear : m_dim;
+
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, owner.depth > 0 ? 1 : 2);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, owner.depth > 0 ? STYLE_DASH : STYLE_SOLID);
+      ObjectSetInteger(0, name, OBJPROP_FILL,  false);
+      ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+
+      // Label at the extreme
+      string txt = StringFormat("OWNER %s  %s  e%.1f",
+                                  owner.dir == 1 ? "^" : "v",
+                                  owner.state, owner.energy);
+      if(ObjectFind(0, lblName) < 0)
+         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
+      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
+      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
+      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
+     }
+
+   //=== Flip Zone box ===============================================
+   //   Use the chart-TF CurveState's ft/fb (flip zone top/bottom) —
+   //   the structural pivot the wave defends. Right-extended so the
+   //   trader sees the level price will react to.
+   void UpdateFlipZone(OmegaCurve &curve)
+     {
+      string name = N("FLIPZONE");
+      string lbl  = N("FLIPZONELBL");
+      CurveState *cs = curve.ChartTfState();
+      if(cs == NULL || cs.ft <= 0 || cs.fb <= 0)
+        {
+         if(ObjectFind(0, name) >= 0) ObjectDelete(0, name);
+         if(ObjectFind(0, lbl)  >= 0) ObjectDelete(0, lbl);
+         return;
+        }
+      datetime t1 = TimeCurrent() - PeriodSeconds(_Period) * 60;
+      datetime t2 = TimeCurrent() + PeriodSeconds(_Period) * 12;
+      double hi = MathMax(cs.ft, cs.fb);
+      double lo = MathMin(cs.ft, cs.fb);
+      color  c  = (cs.dir == 1) ? m_bull : (cs.dir == -1) ? m_bear : (color)0xC084FC;
+
+      if(ObjectFind(0, name) < 0)
+         ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, hi, t2, lo);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 0, hi);
+      ObjectSetInteger(0, name, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, name, OBJPROP_PRICE, 1, lo);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_FILL, true);
+      ObjectSetInteger(0, name, OBJPROP_BACK, true);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+
+      if(ObjectFind(0, lbl) < 0)
+         ObjectCreate(0, lbl, OBJ_TEXT, 0, t2, (hi + lo) / 2.0);
+      ObjectSetInteger(0, lbl, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lbl, OBJPROP_PRICE, 0, (hi + lo) / 2.0);
+      ObjectSetString (0, lbl, OBJPROP_TEXT, "FLIP ZONE");
+      ObjectSetInteger(0, lbl, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lbl, OBJPROP_FONTSIZE, 8);
+      ObjectSetString (0, lbl, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lbl, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, lbl, OBJPROP_HIDDEN, true);
+     }
+
+   //=== Budget target ===============================================
+   void UpdateBudgetTarget(OmegaCurve &curve)
+     {
+      int oidx = curve.tree.ownerIndex;
+      string lineName = N("BUDGET_LINE");
+      string lblName  = N("BUDGET_LBL");
+      if(oidx < 0)
+        {
+         if(ObjectFind(0, lineName) >= 0) ObjectDelete(0, lineName);
+         if(ObjectFind(0, lblName)  >= 0) ObjectDelete(0, lblName);
+         return;
+        }
+      CurveNode owner = curve.tree.tree[oidx];
+      if(!owner.alive || owner.extreme <= 0) return;
+
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      if(bid <= 0) return;
+
+      datetime t1 = TimeCurrent();
+      datetime t2 = t1 + PeriodSeconds(_Period) * 12;
+      color  c  = (owner.dir == 1) ? m_warn : (owner.dir == -1) ? m_bear : m_dim;
+
+      if(ObjectFind(0, lineName) < 0)
+         ObjectCreate(0, lineName, OBJ_TREND, 0, t1, bid, t2, owner.extreme);
+      ObjectSetInteger(0, lineName, OBJPROP_TIME, 0, t1);
+      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 0, bid);
+      ObjectSetInteger(0, lineName, OBJPROP_TIME, 1, t2);
+      ObjectSetDouble (0, lineName, OBJPROP_PRICE, 1, owner.extreme);
+      ObjectSetInteger(0, lineName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, lineName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lineName, OBJPROP_HIDDEN, true);
+
+      string txt = StringFormat(">> BUDGET TGT  %.5f  d%d/%d",
+                                  owner.extreme, owner.depth, 4);
+      if(ObjectFind(0, lblName) < 0)
+         ObjectCreate(0, lblName, OBJ_TEXT, 0, t2, owner.extreme);
+      ObjectSetInteger(0, lblName, OBJPROP_TIME, 0, t2);
+      ObjectSetDouble (0, lblName, OBJPROP_PRICE, 0, owner.extreme);
+      ObjectSetString (0, lblName, OBJPROP_TEXT, txt);
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, c);
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 9);
+      ObjectSetString (0, lblName, OBJPROP_FONT, "Consolas");
+      ObjectSetInteger(0, lblName, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      ObjectSetInteger(0, lblName, OBJPROP_HIDDEN, true);
+     }
+
+   //=== FU spike marks ==============================================
+   //   Wick-fraction detector identical to the Pine indicator's f_fuPool
+   //   shape — runs on chart bars, marks with up/down arrow + barcolor.
+   void UpdateFUMarks()
+     {
+      // Only mark the most-recent confirmed bar to keep object count low.
+      // (The chart accumulates one mark per FU bar over time as bars close.)
+      MqlRates r[];
+      ArraySetAsSeries(r, true);
+      if(CopyRates(_Symbol, _Period, 0, MathMax(m_fuLookback + 2, 6), r) <= 0) return;
+      // r[0] = forming bar, r[1] = last closed bar
+      if(ArraySize(r) < 2) return;
+      MqlRates b = r[1];
+
+      double rng = MathMax(b.high - b.low, _Point);
+      double upperW = (b.high - MathMax(b.open, b.close)) / rng;
+      double lowerW = (MathMin(b.open, b.close) - b.low)  / rng;
+
+      // Highest/lowest among the prior lookback bars (excluding b itself)
+      double pHi = 0, pLo = 0;
+      bool   pOk = false;
+      if(ArraySize(r) >= 2 + m_fuLookback)
+        {
+         pHi = r[2].high;
+         pLo = r[2].low;
+         for(int i = 3; i < 2 + m_fuLookback && i < ArraySize(r); i++)
+           {
+            if(r[i].high > pHi) pHi = r[i].high;
+            if(r[i].low  < pLo) pLo = r[i].low;
+           }
+         pOk = true;
+        }
+
+      bool bear = (upperW >= m_fuWickFrac) && pOk &&
+                  ((b.high >= pHi && b.close < pHi) || (b.close < b.open && b.high >= pHi));
+      bool bull = (lowerW >= m_fuWickFrac) && pOk &&
+                  ((b.low  <= pLo && b.close > pLo) || (b.close > b.open && b.low  <= pLo));
+      if(!bear && !bull) return;
+
+      string id = N("FU_" + IntegerToString((int)b.time));
+      if(ObjectFind(0, id) >= 0) return;  // already marked
+
+      ObjectCreate(0, id, OBJ_ARROW, 0, b.time, bull ? b.low : b.high);
+      ObjectSetInteger(0, id, OBJPROP_ARROWCODE, bull ? 233 : 234);
+      ObjectSetInteger(0, id, OBJPROP_COLOR, bull ? m_bull : m_warn);
+      ObjectSetInteger(0, id, OBJPROP_ANCHOR, bull ? ANCHOR_TOP : ANCHOR_BOTTOM);
+      ObjectSetInteger(0, id, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, id, OBJPROP_HIDDEN, true);
+      ObjectSetString (0, id, OBJPROP_TOOLTIP, bull ? "FU bull" : "FU bear");
+     }
+  };
+
+#endif // __OMEGA_CHART_MQH__
+
+//-- Phase 5.5: chart instance is a single global (declared early so any
+//   class method below can reference it). Init/Update/Deinit are wired
+//   from the EA lifecycle handlers.
+OmegaChart g_chart;
+//-- Phase 5.5: track last decision so the HUD can show what the engine just did
+ENUM_OMEGA_DECISION g_lastDecision = OMEGA_DEC_OBSERVE;
+ENUM_OMEGA_REASON   g_lastReason   = REASON_PHASE_NOT_BUILT;
+
 
 //==================================================================
 //= MODULE: Position/PositionHealth
@@ -6309,7 +6479,8 @@ struct DecisionParams
    double  attackMinStab;     // 60
    double  attackMinConf;     // 55
    double  reverseMinConf;    // 50 — confidence to flip on dead
-   int     enterMinAlign;     // 4 — alignment count required
+   int     enterMinAlign;     // legacy — TF-count threshold for HUD info row only
+   double  narrAlignMin;      // 65 — narrative coherence floor (canonical gate)
    int     maxBudget;         // 4 — max positions per campaign
    double  defaultSlAtrMult;  // 1.5 — fallback SL when no protective extreme
    double  reduceLifeFloor;   // 38 — life below this triggers REDUCE if profitable
@@ -6320,6 +6491,7 @@ struct DecisionParams
       attackMinLife = 60.0; attackMinStab = 60.0; attackMinConf = 55.0;
       reverseMinConf = 50.0;
       enterMinAlign = 4;
+      narrAlignMin  = 65.0;
       maxBudget = 4;
       defaultSlAtrMult = 1.5;
       reduceLifeFloor = 38.0;
@@ -6465,37 +6637,34 @@ public:
         }
 
       //--- 5. HOLDING / ALIVE: entries and adds.
-      //    THEORY CORRECTION (Phase 5.5.2): timeframe alignment is a
-      //    SUPPORTING signal, not a hard gate. Lower TFs rotating against
-      //    higher TFs IS the curve tree at work — children recursing against
-      //    a parent. The actual decision driver is the curve tree owner +
-      //    Trinity. Alignment is already folded into stability upstream
-      //    (Story engine), so requiring it again here was double-counting
-      //    and architecturally wrong.
-      //    `aligned` is kept as INFO only — surfaced in the trade comment
-      //    and HUD so the trader can see the cross-TF context, but never
-      //    blocks an entry.
-      bool aligned = (state.supporting.alignment >= (p.enterMinAlign / 6.0) * 100.0);
+      //    Phase 5.5.3 — narrative-coherence gate (per F72 spec).
+      //    The single relationship-quality gate, applied AFTER Trinity
+      //    floors. `aligned` no longer means "TF count >= N"; it means
+      //    "the relationships supporting this story are coherent enough"
+      //    (NarrativeAlignment::Compute total >= p.narrAlignMin).
+      bool aligned = (state.supporting.alignment >= p.narrAlignMin);
 
       if(verdict == LIFE_HOLDING)
         {
          if(activeSameDirCount == 0)
            {
             if(state.confidence >= p.enterMinConf
-               && state.stability >= p.enterMinStability)
+               && state.stability >= p.enterMinStability
+               && aligned)
               {
                r.decision      = OMEGA_DEC_ENTER_LONG;
                if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
                r.reason        = REASON_HEALTHY_CONTINUATION;
                r.suggestedRole = POS_ORIGIN;
-               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f align %.0f%% (info) — origin entry",
+               r.detail        = StringFormat("holding @ life %.1f stab %.1f conf %.1f narr-align %.0f%% — origin entry",
                                               state.life, state.stability, state.confidence,
                                               state.supporting.alignment);
                return r;
               }
             r.decision = OMEGA_DEC_OBSERVE;
             r.reason   = REASON_NARRATIVE_DIVERGE;
-            r.detail   = "holding but stability/conf below entry";
+            r.detail   = StringFormat("holding · stab %.0f conf %.0f narr-align %.0f%% below entry",
+                                       state.stability, state.confidence, state.supporting.alignment);
             return r;
            }
          r.decision = OMEGA_DEC_HOLD;
@@ -6508,20 +6677,22 @@ public:
       if(activeSameDirCount == 0)
         {
          if(state.confidence >= p.attackMinConf
-            && state.stability >= p.attackMinStab)
+            && state.stability >= p.attackMinStab
+            && aligned)
            {
             r.decision      = OMEGA_DEC_ENTER_LONG;
             if(ownerDir == -1) r.decision = OMEGA_DEC_ENTER_SHORT;
             r.reason        = REASON_HEALTHY_CONTINUATION;
             r.suggestedRole = POS_ORIGIN;
-            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f align %.0f%% (info) — origin entry (strong)",
+            r.detail        = StringFormat("ALIVE @ life %.1f stab %.1f conf %.1f narr-align %.0f%% — origin entry (strong)",
                                             state.life, state.stability, state.confidence,
                                             state.supporting.alignment);
             return r;
            }
          //-- alive but conditions for full attack not met → demote to normal entry
          if(state.stability >= p.enterMinStability
-            && state.confidence >= p.enterMinConf)
+            && state.confidence >= p.enterMinConf
+            && aligned)
            {
             r.decision = (ownerDir == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
             r.reason   = REASON_HEALTHY_CONTINUATION;
@@ -6531,7 +6702,8 @@ public:
            }
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = REASON_NARRATIVE_DIVERGE;
-         r.detail   = "alive but stability/conf below threshold";
+         r.detail   = StringFormat("alive · stab %.0f conf %.0f narr-align %.0f%% below threshold",
+                                    state.stability, state.confidence, state.supporting.alignment);
          return r;
         }
 
@@ -7628,7 +7800,8 @@ input double              InpAttackMinLife    = 60.0;                 // Min lif
 input double              InpAttackMinStab    = 60.0;                 // Min stability for ALIVE entries
 input double              InpAttackMinConf    = 55.0;                 // Min confidence for ALIVE entries
 input double              InpReverseMinConf   = 50.0;                 // Min confidence to FLIP on dead
-input int                 InpEnterMinAlign    = 4;                    // Min aligned TFs (out of 6) to enter
+input int                 InpEnterMinAlign    = 4;                    // (legacy / info only) TF-count for HUD info row
+input double              InpNarrativeAlignmentMin = 65.0;            // Narrative coherence floor (canonical gate, 0..100)
 input int                 InpMaxBudget        = 4;                    // Max positions per campaign
 input double              InpDefaultSlAtrMult = 1.5;                  // Fallback SL = N × ATR
 input double              InpReduceLifeFloor  = 38.0;                 // Below this: REDUCE if profitable
@@ -7734,6 +7907,7 @@ int OnInit()
    g_dparams.attackMinConf     = InpAttackMinConf;
    g_dparams.reverseMinConf    = InpReverseMinConf;
    g_dparams.enterMinAlign     = InpEnterMinAlign;
+   g_dparams.narrAlignMin      = InpNarrativeAlignmentMin;
    g_dparams.maxBudget         = InpMaxBudget;
    g_dparams.defaultSlAtrMult  = InpDefaultSlAtrMult;
    g_dparams.reduceLifeFloor   = InpReduceLifeFloor;
@@ -7765,6 +7939,7 @@ int OnInit()
                 InpChartBudgetTgt, InpChartFUMarks, InpChartPositions,
                 0.30, 5);
    g_chart.SetEntryGates(InpEnterMinAlign);
+   g_chart.SetNarrativeAlignMin(InpNarrativeAlignmentMin);
 
 //--- 10. News calendar (Phase 7, optional).
    g_news.Load();
@@ -7904,7 +8079,7 @@ void OnTick()
 
    //-- Phase 5.5: refresh chart visualization every tick (cheap; objects
    //   are re-positioned in place, no per-tick allocation).
-   g_chart.Update(g_state, g_curve, g_risk, g_capital, g_lastDecision, g_lastReason);
+   g_chart.Update(g_state, g_curve, g_risk, g_capital, g_story, g_lastDecision, g_lastReason);
   }
 
 //+------------------------------------------------------------------+
