@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v52", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v53", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -37,7 +37,7 @@ bool   showParticipants = input.bool(true, "Show Participant interference zones 
 bool   showCurve   = input.bool(true, "Show Curve object — energy state (F72 foundation, middle-right)", group = GRP)
 bool   showTree    = input.bool(true, "Plot CURVE TREE on chart (live curves · origin→extreme · emergent phase)", group = GRP)
 string curveCtx    = input.string("Chart wave", "Curve TREE root anchor", options = ["Chart wave", "Higher TF", "Highest TF"], tooltip = "Which curve the tree tracks. 'Chart wave' = the chart timeframe's own curve (recommended — the MTF map already shows higher-timeframe context). 'Higher/Highest TF' climb the timeframe ladder. The panel header shows the actual resolved timeframe.", group = GRP)
-bool   phaseFromNode = input.bool(true, "Phase label driven by curve NODE (emergent) — off = legacy machine", group = GRP, tooltip = "ON: the on-chart phase regions + readout follow the curve tree's emergent node.state (1-bar settle, debounced). OFF: the legacy Engine-1A machine phase drives the label.")
+bool   phaseFromNode = input.bool(false, "Phase label driven by curve NODE (emergent) — off = legacy machine", group = GRP, tooltip = "OFF (default): the on-chart phase regions + readout follow the legacy Engine-1A machine phase (the original, more accurate labels). ON: they follow the curve tree's emergent node.state (1-bar settle, debounced) — experimental.")
 int    minConf     = input.int  (55,  "Min confidence to ATTACK",     group = GRP, minval = 0, maxval = 100)
 int    pivLen      = input.int  (8,   "Wave pivot length",            group = GRP, minval = 2, maxval = 50)
 bool   showRegions = input.bool (true, "Show phase REGION labels",    group = GRP)
