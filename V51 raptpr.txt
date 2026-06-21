@@ -1819,9 +1819,13 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     string _vMTF   = mtfStory == "no dominant owner" ? "Across the timeframes there's no clear lead." : "Across the stack, " + mtfStory + " — " + str.tostring(mtfAlignN) + " of 6 line up and " + mtfOwnerL + " is the one driving it."
     string _vRetr  = na(_retrX) ? "" : _retrX < 30.0 ? " We're parked near the extreme — shallow and healthy." : _retrX > 70.0 ? " We've pulled deep toward the origin — that's the danger zone." : ""
     string _vPar   = _htfThreat == "—" ? "" : _htfThreat == "AT ZONE" ? "We're right at the " + _wl6 + " parent zone — that's where this gets decided, stay sharp." : _htfThreat == "APPROACHING" ? "We're closing in on the " + _wl6 + " parent level — watch how it reacts there." : "The " + _wl6 + " parent's still got clear runway, so there's room to run."
-    string _vAlive = "Curve verdict: " + str.replace_all(str.replace_all(str.replace_all(_aliveTx, "◆ ", ""), "▲ ", ""), "● ", "") + "."
+    string _vAlive = "Curve verdict: " + _aliveTx
     int    WW = 40
-    string senzoVoice = f_wrap(_vBias + _vReg, WW) + "\n" + f_wrap(_vEng, WW) + "\n" + f_wrap(_vTree + _vRetr, WW) + "\n" + f_wrap(_vForce, WW) + "\n" + f_wrap(_vLin + _vChain, WW) + "\n" + f_wrap(_vMTF, WW) + (_vPar == "" ? "" : "\n" + f_wrap(_vPar, WW)) + "\n" + f_wrap(_vTime, WW) + "\n" + f_wrap(_vTgt + " " + _vRisk, WW) + "\n" + f_wrap(_vAlive, WW)
+    string _szStory1 = _vBias + _vReg + " " + _vEng
+    string _szStory2 = _vTree + _vRetr + " " + _vForce + " " + _vLin + _vChain
+    string _szStory3 = _vMTF + (_vPar == "" ? "" : " " + _vPar) + " " + _vTime
+    string _szStory4 = _vTgt + " " + _vRisk + " " + _vAlive
+    string senzoVoice = f_wrap(_szStory1, WW) + "\n" + f_wrap(_szStory2, WW) + "\n" + f_wrap(_szStory3, WW) + "\n" + f_wrap(_szStory4, WW)
     string _armed = action == "ATTACK" ? "● ARMED" : action == "PREPARE" ? "◐ STANDBY" : str.startswith(action, "MANAGE") ? "◧ MANAGE" : "○ SAFE"
     color  _armCol = action == "ATTACK" ? #34d399 : action == "PREPARE" ? #fbbf24 : str.startswith(action, "MANAGE") ? #38bdf8 : #475569
     string _blk = ""
@@ -1891,13 +1895,13 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 0, 0, "◤ OPPORTUNITY", text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 8))
     table.cell(copilot, 1, 0, _armed + " " + _liveDot, text_color = _armCol, text_size = size.normal, bgcolor = color.new(#0c4a6e, 8))
     table.cell(copilot, 0, 1, "⟢ SITREP", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 1, f_wrap(_coStory, WW), text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 1, 1, _coStory, text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 2, "⟢ VECTOR", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 2, f_wrap(tSeq, WW), text_color = #7dd3fc, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 1, 2, tSeq, text_color = #7dd3fc, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 3, "◈ FLIGHT PLAN ▸ " + str.tostring(_primProb) + "%", text_color = #03120a, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#34d399, 40))
     table.cell(copilot, 1, 3, f_wrap(_primPath, WW), text_color = #d1fae5, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 4, "◈ ALT ▸ " + str.tostring(_altProb) + "%", text_color = #1a1403, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#fbbf24, 55))
-    table.cell(copilot, 1, 4, f_wrap(_altPath, WW), text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 1, 4, _altPath, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 5, "◉ CONTACTS", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 5, str.tostring(_convN) + " tracked · " + f_cpNode(attrIdx), text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 6, "✸ CYCLE RADAR", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 35))
@@ -1927,7 +1931,7 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 0, 18, senzoVoice, text_color = #e8edff, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 18, "", text_size = size.small)
     table.cell(copilot, 0, 19, "▮ ENERGY", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 19, f_wrap(_szEnergy + "  ·  " + str.tostring(math.round(_szComp)) + "% resolved", WW), text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 1, 19, _szEnergy + "  ·  " + str.tostring(math.round(_szComp)) + "% resolved", text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 20, "▮ THREAT BOARD", text_color = #060a12, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(_szRiskCol, 35))
     table.cell(copilot, 1, 20, _szRisk, text_color = #060a12, text_size = size.small, bgcolor = color.new(_szRiskCol, 35))
     table.cell(copilot, 0, 21, "▮ CONFIDENCE", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
@@ -1936,7 +1940,7 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     table.cell(copilot, 1, 22, f_wrap(blockers, WW), text_color = blockers == "Clear — no blockers" ? #34d399 : #fda4af, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 0, 23, f_wrap(_vClose, 26), text_color = #060a12, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_armCol, 25))
     table.cell(copilot, 1, 23, _armed, text_color = #060a12, text_size = size.normal, bgcolor = color.new(_armCol, 25))
-    table.cell(copilot, 0, 24, f_wrap("◣ " + str.replace_all(matters, "\n", " ") + " ◢", WW), text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 0, 24, "◣ " + str.replace_all(matters, "\n", " ") + " ◢", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
     table.cell(copilot, 1, 24, "", text_size = size.small)
 
 f_drawMatrix(int master, string action, float conflict, float threat) =>
