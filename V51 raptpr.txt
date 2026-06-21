@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v61", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v62", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -1849,19 +1849,46 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     string _vRetr  = na(_retrX) ? "" : _retrX < 30.0 ? " We're parked near the extreme — shallow and healthy." : _retrX > 70.0 ? " We've pulled deep toward the origin — that's the danger zone." : ""
     string _vPar   = _htfThreat == "—" ? "" : _htfThreat == "AT ZONE" ? "We're right at the " + _wl6 + " parent zone — that's where this gets decided, stay sharp." : _htfThreat == "APPROACHING" ? "We're closing in on the " + _wl6 + " parent level — watch how it reacts there." : "The " + _wl6 + " parent's still got clear runway, so there's room to run."
     string _vAlive = "Curve verdict: " + _aliveTx
-    // ── ONE-LINE SYNTHESIS — fold the curve tree state, the MTF stack, force and
-    //    life into a single trader-voice "story" so Senzo doesn't just list facts
-    //    but tells you what's actually happening across the whole picture. ───────
+    // ── F60 LIFECYCLE LENS (precision authority) — the 15-phase machine phase
+    //    is the most precise anchor (above LETRA family + V72 narrative). Senzo
+    //    leads every story with where the F60 lifecycle says we are, then ties
+    //    that to the curve tree owner state and the MTF stack relationships. ─────
+    string _f60Phase = ie1a_currentPhase
+    string _f60Read  = _f60Phase == "Point 4 Origin"           ? "we're sitting on Point-4 origin — the seed, where the new curve gets born; price is establishing the floor/ceiling for everything that follows" :
+                       _f60Phase == "Expansion"                ? "we're in raw expansion — the move is unfolding, force should be building, this is run-with-it territory" :
+                       _f60Phase == "Expansion Pre-Convexity"  ? "expansion hasn't peaked yet — pre-convexity, we're still inside the runway, look for the convexity flip" :
+                       _f60Phase == "Expansion Induction"      ? "induction inside expansion — late-comers being trapped, the move's about to extend through them" :
+                       _f60Phase == "Expansion Liquidity"      ? "expansion liquidity — the move is sweeping the liquidity it needs, deliberate not random" :
+                       _f60Phase == "New High"                 ? "fresh new high printed — creation, this is the high-water mark, decisions get made off it" :
+                       _f60Phase == "New Low"                  ? "fresh new low printed — creation, the new floor; reactions off this define the next campaign" :
+                       _f60Phase == "Transition"               ? "transition — the curve is hesitating between continuation and rotation, don't commit before it picks" :
+                       _f60Phase == "Retracement"              ? "we're retracing into the curve — pullback territory, watch compression and the FU for the bounce" :
+                       _f60Phase == "HTF Flip Zone"            ? "we're inside the HTF flip zone — the order block; this is where ownership defends or hands over" :
+                       _f60Phase == "Induction"                ? "induction — they're being trapped one more time before the real move; patience pays here" :
+                       _f60Phase == "Liquidation"              ? "liquidation phase — stops are getting raided, force is collapsing, fade strength / chase weakness with care" :
+                       _f60Phase == "Terminal Curve"           ? "terminal curve — this campaign is finishing, do NOT add, manage what's open and respect the chain decay" :
+                       _f60Phase == "Demand Return"            ? "demand return — price is coming back to its origin demand, the buyer should defend or the curve dies" :
+                       _f60Phase == "Supply Return"            ? "supply return — price is coming back to its origin supply, the seller should defend or the curve dies" :
+                       "phase forming"
+    string _vF60   = "F60 says: " + _f60Phase + " — " + _f60Read + "."
+    // ── ONE-LINE SYNTHESIS — fold F60 lifecycle (precision), curve tree state,
+    //    MTF stack, force and life into a trader-voice "story" so Senzo doesn't
+    //    list facts but tells you what's actually happening across the whole
+    //    picture, anchored on F60 phase as the truth source. ────────────────────
     string _vCurveLine = _ownDirT == 0 ? "no curve has the wheel" : ((_ownDirT == 1 ? "the bull curve" : "the bear curve") + " owns this in " + _ownState)
     string _vStackLine = mtfAlignN >= 4 ? "stack's lined up behind it " + str.tostring(mtfAlignN) + "/6" : mtfAlignN <= 2 ? "stack's against it " + str.tostring(mtfAlignN) + "/6" : "stack's split " + str.tostring(mtfAlignN) + "/6"
     string _vForceLine = _cpState == "PERSISTING" ? "force still persisting" : _cpState == "LEAKING" ? "force leaking, ownership ripe to flip" : "force neutral"
-    string _vSynth     = "STORY: " + _vCurveLine + ", " + _vStackLine + ", " + _vForceLine + ", life " + str.tostring(math.round(_life)) + " — " + (action == "ATTACK" ? "the picture lines up, I'd take the shot." : action == "PREPARE" ? "pieces are aligning, not quite there." : str.startswith(action, "MANAGE") ? "manage what you've got, don't add until it clears." : "nothing here worth risk, sit on your hands.")
-    int    WW = 28
-    string _szStory1 = _vBias + _vReg + " " + _vEng
-    string _szStory2 = _vTree + _vRetr + " " + _vForce + " " + _vLin + _vChain
-    string _szStory3 = _vMTF + (_vPar == "" ? "" : " " + _vPar) + " " + _vTime
-    string _szStory4 = _vTgt + " " + _vRisk + " " + _vAlive
-    string senzoVoice = f_wrap(_vSynth, WW) + "\n" + f_wrap(_szStory1, WW) + "\n" + f_wrap(_szStory2, WW) + "\n" + f_wrap(_szStory3, WW) + "\n" + f_wrap(_szStory4, WW)
+    string _vMtfOwnLine = mtfOwnerL == "" ? "" : mtfOwnerL + " is the rung driving it"
+    string _vChainLine  = _chainScope == "healthy" ? "chain healthy" : _chainScope == "WHOLE CHAIN decaying" ? "chain bled out" : _chainScope
+    string _vNarrLine   = _narrState == "STRENGTHENING" ? "lineage building" : _narrState == "WEAKENING" ? "lineage fading" : "lineage flat"
+    string _vSynth     = "STORY: F60 " + _f60Phase + " · " + _vCurveLine + " · " + _vStackLine + (_vMtfOwnLine == "" ? "" : " (" + _vMtfOwnLine + ")") + " · " + _vForceLine + " · " + _vNarrLine + " · " + _vChainLine + " · life " + str.tostring(math.round(_life)) + " — " + (action == "ATTACK" ? "the picture lines up, I'd take the shot." : action == "PREPARE" ? "pieces are aligning, not quite there." : str.startswith(action, "MANAGE") ? "manage what you've got, don't add until it clears." : "nothing here worth risk, sit on your hands.")
+    int    WW = 20
+    string _szStory1 = _vF60 + " " + _vBias + _vReg
+    string _szStory2 = _vEng + " " + _vTree + _vRetr
+    string _szStory3 = _vForce + " " + _vLin + _vChain
+    string _szStory4 = _vMTF + (_vPar == "" ? "" : " " + _vPar) + " " + _vTime
+    string _szStory5 = _vTgt + " " + _vRisk + " " + _vAlive
+    string senzoVoice = f_wrap(_vSynth, WW) + "\n" + f_wrap(_szStory1, WW) + "\n" + f_wrap(_szStory2, WW) + "\n" + f_wrap(_szStory3, WW) + "\n" + f_wrap(_szStory4, WW) + "\n" + f_wrap(_szStory5, WW)
     string _armed = action == "ATTACK" ? "● ARMED" : action == "PREPARE" ? "◐ STANDBY" : str.startswith(action, "MANAGE") ? "◧ MANAGE" : "○ SAFE"
     color  _armCol = action == "ATTACK" ? #34d399 : action == "PREPARE" ? #fbbf24 : str.startswith(action, "MANAGE") ? #38bdf8 : #475569
     string _blk = ""
@@ -1928,52 +1955,52 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
 
     if na(copilot)
         copilot := table.new(position.bottom_right, 2, 25, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
-    table.cell(copilot, 0, 0, "◤ OPPORTUNITY", text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 8))
-    table.cell(copilot, 1, 0, _armed + " " + _liveDot, text_color = _armCol, text_size = size.normal, bgcolor = color.new(#0c4a6e, 8))
-    table.cell(copilot, 0, 1, "⟢ SITREP", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 1, _coStory, text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 2, "⟢ VECTOR", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 2, tSeq, text_color = #7dd3fc, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 3, "◈ FLIGHT PLAN ▸ " + str.tostring(_primProb) + "%", text_color = #03120a, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#34d399, 40))
-    table.cell(copilot, 1, 3, f_wrap(_primPath, WW), text_color = #d1fae5, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 4, "◈ ALT ▸ " + str.tostring(_altProb) + "%", text_color = #1a1403, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#fbbf24, 55))
-    table.cell(copilot, 1, 4, _altPath, text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 5, "◉ CONTACTS", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 5, str.tostring(_convN) + " tracked · " + f_cpNode(attrIdx), text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 6, "✸ CYCLE RADAR", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 35))
-    table.cell(copilot, 1, 6, (timeDir == 1 ? "▲ CLIMB" : timeDir == -1 ? "▼ DIVE" : "— LEVEL"), text_color = timeDir == 1 ? #34d399 : timeDir == -1 ? #fb7185 : #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 35))
-    table.cell(copilot, 0, 7, "MN ▸ " + f_tBar(tMnO, tMnH, tMnL), text_color = f_tCol(tMnHt, tMnLt), text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 7, f_tIcons(tMnHt, tMnLt) + " " + f_tRem(f_tEl(tMnT, "M"), "M"), text_color = f_tCol(tMnHt, tMnLt), text_size = size.small)
-    table.cell(copilot, 0, 8, "WK ▸ " + f_tBar(tWO, tWH, tWL), text_color = f_tCol(tWHt, tWLt), text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 8, f_tIcons(tWHt, tWLt) + " " + f_tRem(f_tEl(tWT, "W"), "W"), text_color = f_tCol(tWHt, tWLt), text_size = size.small)
-    table.cell(copilot, 0, 9, "D  ▸ " + f_tBar(tDO, tDH, tDL), text_color = f_tCol(tDHt, tDLt), text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 9, f_tIcons(tDHt, tDLt) + " " + f_tRem(f_tEl(tDT, "D"), "D"), text_color = f_tCol(tDHt, tDLt), text_size = size.small)
-    table.cell(copilot, 0, 10, "H4 ▸ " + f_tBar(tH4O, tH4H, tH4L), text_color = f_tCol(tH4Ht, tH4Lt), text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 10, f_tIcons(tH4Ht, tH4Lt) + " " + f_tRem(f_tEl(tH4T, "240"), "240"), text_color = f_tCol(tH4Ht, tH4Lt), text_size = size.small)
-    table.cell(copilot, 0, 11, "H1 ▸ " + f_tBar(tH1O, tH1H, tH1L), text_color = f_tCol(tH1Ht, tH1Lt), text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 11, "« " + f_tIcons(tH1Ht, tH1Lt) + " " + f_tRem(f_tEl(tH1T, "60"), "60"), text_color = f_tCol(tH1Ht, tH1Lt), text_size = size.small)
-    table.cell(copilot, 0, 12, "⊙ TGT LOCK  P/S/E", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 12, _attTx, text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 14, "⟁ H4 / H1", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 14, _alH4 + " / " + _alH1, text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 15, "▣ FIRING SOLUTION", text_color = #03120a, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_oppGCol, 28))
-    table.cell(copilot, 1, 15, _oppGrade + "  " + str.tostring(math.round(oppScore)) + "/100", text_color = #03120a, text_size = size.normal, bgcolor = color.new(_oppGCol, 28))
-    table.cell(copilot, 0, 16, "◤ SENZO ▌ CHIEF", text_color = #e7e3ff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#4338ca, 18))
-    table.cell(copilot, 1, 16, "ON COMMS " + _liveDot, text_color = _pulse ? #a5b4fc : #475569, text_size = size.normal, bgcolor = color.new(#4338ca, 18))
-    table.cell(copilot, 0, 17, "▌ SENZO", text_color = #a5b4fc, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 17, _szMarket + " · " + _szRegime, text_color = #c7d2fe, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 18, senzoVoice, text_color = #e8edff, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 19, "▮ ENERGY", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 19, _szEnergy + "  ·  " + str.tostring(math.round(_szComp)) + "% resolved", text_color = #a78bfa, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 20, "▮ THREAT BOARD", text_color = #060a12, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(_szRiskCol, 35))
-    table.cell(copilot, 1, 20, _szRisk, text_color = #060a12, text_size = size.small, bgcolor = color.new(_szRiskCol, 35))
-    table.cell(copilot, 0, 21, "▮ CONFIDENCE", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 21, f_gauge(_szConf) + " " + str.tostring(math.round(_szConf)) + "%", text_color = _szConf >= 60 ? #34d399 : #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 22, "▮ BLOCKERS", text_color = #fda4af, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 1, 22, f_wrap(blockers, WW), text_color = blockers == "Clear — no blockers" ? #34d399 : #fda4af, text_size = size.small, text_halign = text.align_left)
-    table.cell(copilot, 0, 23, f_wrap(_vClose, 26), text_color = #060a12, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_armCol, 25))
-    table.cell(copilot, 1, 23, _armed, text_color = #060a12, text_size = size.normal, bgcolor = color.new(_armCol, 25))
-    table.cell(copilot, 0, 24, "◣ " + str.replace_all(matters, "\n", " ") + " ◢", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(copilot, 0, 0, "◤ OPP", text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 8))
+    table.cell(copilot, 1, 0, _armed + " " + _liveDot, text_color = _armCol, text_size = size.small, bgcolor = color.new(#0c4a6e, 8))
+    table.cell(copilot, 0, 1, "SITREP", text_color = #5fd0ff, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 1, _coStory, text_color = #e2e8f0, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 2, "VECTOR", text_color = #5fd0ff, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 2, tSeq, text_color = #7dd3fc, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 3, "PLAN " + str.tostring(_primProb) + "%", text_color = #03120a, text_size = size.tiny, text_halign = text.align_left, bgcolor = color.new(#34d399, 40))
+    table.cell(copilot, 1, 3, f_wrap(_primPath, WW), text_color = #d1fae5, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 4, "ALT " + str.tostring(_altProb) + "%", text_color = #1a1403, text_size = size.tiny, text_halign = text.align_left, bgcolor = color.new(#fbbf24, 55))
+    table.cell(copilot, 1, 4, _altPath, text_color = #94a3b8, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 5, "CONTACTS", text_color = #5fd0ff, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 5, str.tostring(_convN) + "·" + f_cpNode(attrIdx), text_color = #a78bfa, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 6, "CYCLE", text_color = #d7faff, text_size = size.tiny, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 35))
+    table.cell(copilot, 1, 6, (timeDir == 1 ? "▲ CLIMB" : timeDir == -1 ? "▼ DIVE" : "— LEVEL"), text_color = timeDir == 1 ? #34d399 : timeDir == -1 ? #fb7185 : #94a3b8, text_size = size.tiny, bgcolor = color.new(#0c4a6e, 35))
+    table.cell(copilot, 0, 7, "MN " + f_tBar(tMnO, tMnH, tMnL), text_color = f_tCol(tMnHt, tMnLt), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 7, f_tIcons(tMnHt, tMnLt) + " " + f_tRem(f_tEl(tMnT, "M"), "M"), text_color = f_tCol(tMnHt, tMnLt), text_size = size.tiny)
+    table.cell(copilot, 0, 8, "WK " + f_tBar(tWO, tWH, tWL), text_color = f_tCol(tWHt, tWLt), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 8, f_tIcons(tWHt, tWLt) + " " + f_tRem(f_tEl(tWT, "W"), "W"), text_color = f_tCol(tWHt, tWLt), text_size = size.tiny)
+    table.cell(copilot, 0, 9, "D " + f_tBar(tDO, tDH, tDL), text_color = f_tCol(tDHt, tDLt), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 9, f_tIcons(tDHt, tDLt) + " " + f_tRem(f_tEl(tDT, "D"), "D"), text_color = f_tCol(tDHt, tDLt), text_size = size.tiny)
+    table.cell(copilot, 0, 10, "H4 " + f_tBar(tH4O, tH4H, tH4L), text_color = f_tCol(tH4Ht, tH4Lt), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 10, f_tIcons(tH4Ht, tH4Lt) + " " + f_tRem(f_tEl(tH4T, "240"), "240"), text_color = f_tCol(tH4Ht, tH4Lt), text_size = size.tiny)
+    table.cell(copilot, 0, 11, "H1 " + f_tBar(tH1O, tH1H, tH1L), text_color = f_tCol(tH1Ht, tH1Lt), text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 11, f_tIcons(tH1Ht, tH1Lt) + " " + f_tRem(f_tEl(tH1T, "60"), "60"), text_color = f_tCol(tH1Ht, tH1Lt), text_size = size.tiny)
+    table.cell(copilot, 0, 12, "TGT P/S/E", text_color = #fbbf24, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 12, _attTx, text_color = #fde68a, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 14, "H4/H1", text_color = #5fd0ff, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 14, _alH4 + " / " + _alH1, text_color = #e2e8f0, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 15, "FIRING", text_color = #03120a, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(_oppGCol, 28))
+    table.cell(copilot, 1, 15, _oppGrade + " " + str.tostring(math.round(oppScore)) + "/100", text_color = #03120a, text_size = size.small, bgcolor = color.new(_oppGCol, 28))
+    table.cell(copilot, 0, 16, "◤ SENZO", text_color = #e7e3ff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#4338ca, 18))
+    table.cell(copilot, 1, 16, "ON COMMS " + _liveDot, text_color = _pulse ? #a5b4fc : #475569, text_size = size.small, bgcolor = color.new(#4338ca, 18))
+    table.cell(copilot, 0, 17, "▌", text_color = #a5b4fc, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 17, _szMarket + " · " + _szRegime, text_color = #c7d2fe, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 18, senzoVoice, text_color = #e8edff, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 19, "ENERGY", text_color = #94a3b8, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 19, _szEnergy + " · " + str.tostring(math.round(_szComp)) + "%", text_color = #a78bfa, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 20, "THREAT", text_color = #060a12, text_size = size.tiny, text_halign = text.align_left, bgcolor = color.new(_szRiskCol, 35))
+    table.cell(copilot, 1, 20, _szRisk, text_color = #060a12, text_size = size.tiny, bgcolor = color.new(_szRiskCol, 35))
+    table.cell(copilot, 0, 21, "CONF", text_color = #94a3b8, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 21, f_gauge(_szConf) + " " + str.tostring(math.round(_szConf)) + "%", text_color = _szConf >= 60 ? #34d399 : #fbbf24, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 22, "BLOCK", text_color = #fda4af, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 1, 22, f_wrap(blockers, WW), text_color = blockers == "Clear — no blockers" ? #34d399 : #fda4af, text_size = size.tiny, text_halign = text.align_left)
+    table.cell(copilot, 0, 23, f_wrap(_vClose, 18), text_color = #060a12, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(_armCol, 25))
+    table.cell(copilot, 1, 23, _armed, text_color = #060a12, text_size = size.small, bgcolor = color.new(_armCol, 25))
+    table.cell(copilot, 0, 24, "◣ " + str.replace_all(matters, "\n", " ") + " ◢", text_color = #5eead4, text_size = size.tiny, text_halign = text.align_left)
 
 f_drawMatrix(int master, string action, float conflict, float threat) =>
     var table matrix = na
@@ -2413,14 +2440,15 @@ f_tfExt(int _d, float _sh, float _sl) => _d == 1 ? _sh : _d == -1 ? _sl : na
 f_tfCoord(float _o, float _x) => (na(_o) ? "—" : str.tostring(math.round_to_mintick(_o))) + "→" + (na(_x) ? "—" : str.tostring(math.round_to_mintick(_x))) + "→" + str.tostring(math.round_to_mintick(close))
 f_tfRel(int _d, int _pd) => (_d == 0 or _pd == 0) ? "—" : _d == _pd ? "↑ align" : "✗ counter"
 f_dirArrow(int _d) => _d == 1 ? "▲" : _d == -1 ? "▼" : "—"
-// ── TOP PANELS — MTF CURVE MAP (own table @ top_left) and CURVE TREE (own table
-//    @ top_right) — split so each is clearly anchored to a top corner with no
-//    overlap and no shared-column rendering. ──────────────────────────────────
+// ── TOP PANELS — CURVE TREE (own table @ top_left, the precision authority — F60
+//    lifecycle owner curve, life, force, lineage) and MTF CURVE MAP (own table @
+//    top_right, cross-timeframe relationship view) — split so each is clearly
+//    anchored to a top corner with no overlap and no shared-column rendering. ──
 var table mtfT  = na
 var table treeT = na
 if barstate.islast and showCurve
     if na(mtfT)
-        mtfT := table.new(position.top_left, 4, 9, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
+        mtfT := table.new(position.top_right, 4, 9, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
     // ── OWNERSHIP MERGE (Principle 9) — does the child curve respect the parent FU
     //    and collapse back into it (Camp B → Camp A, parent campaign NOT finished),
     //    or did it break the parent (genuine handoff → new campaign)? ─────────────
@@ -2476,8 +2504,9 @@ if barstate.islast and showCurve
 // ══════════════════════════════════════════════════════════════════════════════
 if barstate.islast and showCurve
     if na(treeT)
-        treeT := table.new(position.top_right, 2, 16, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
-    // curve tree writes into its own treeT table at top_right (cols 0-1)
+        treeT := table.new(position.top_left, 2, 16, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
+    // curve tree writes into its own treeT table at top_left — the prominent
+    // primary readout (the curve owns the story; F60 lifecycle is precision authority)
     string _odTx = _ownDirT == 1 ? "▲ BULL" : _ownDirT == -1 ? "▼ BEAR" : "○ —"
     string _ownLoc = (na(_ownOrig) or na(_ownExt)) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " → " + str.tostring(math.round_to_mintick(_ownExt)) + " → " + str.tostring(math.round_to_mintick(close))
     float  _retrFromX = (na(_ownOrig) or na(_ownExt) or _ownExt == _ownOrig) ? na : math.abs(_ownExt - close) / math.abs(_ownExt - _ownOrig) * 100.0
