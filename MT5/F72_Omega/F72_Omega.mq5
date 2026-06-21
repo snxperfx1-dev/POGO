@@ -6744,7 +6744,7 @@ public:
          //   below the noise floor we WAIT (not BLOCK).
          if(activeCounterCount == 0)
            {
-            double counterScore = r.conviction * r.evCounter / 100.0;
+            double counterScore = MathMin(100.0, r.conviction * r.evCounter);
             if(counterScore > 25.0)
               {
                r.decision           = OMEGA_DEC_REVERSE;
@@ -6798,7 +6798,7 @@ public:
       //  state combinations.
       if(activeSameDirCount == 0)
         {
-         double score = r.conviction * r.evWith / 100.0;
+         double score = MathMin(100.0, r.conviction * r.evWith);
          if(score < 15.0)
            {
             r.decision = OMEGA_DEC_OBSERVE;
@@ -6820,7 +6820,7 @@ public:
       int totalSameDir = activeSameDirCount;
       if(totalSameDir < p.maxBudget && story.progressing)
         {
-         double addScore = r.conviction * r.evWith / 100.0;
+         double addScore = MathMin(100.0, r.conviction * r.evWith);
          //   Adds need slightly higher score than first entries to
          //   prevent compounding weak setups. Still continuous, never
          //   a component veto.
