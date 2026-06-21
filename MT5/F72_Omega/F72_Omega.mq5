@@ -2,7 +2,7 @@
 //|                                                    F72_Omega.mq5 |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|       *** SINGLE-FILE BUNDLE — Phases 1+2+3+4+5 ***              |
+//|     *** SINGLE-FILE BUNDLE — Phases 1+2+3+4+5+6+7 (complete) *** |
 //|                                                                  |
 //|   This file contains every module of the F72 OMEGA engine        |
 //|   inlined in dependency order. To reproduce the modular layout,  |
@@ -13,9 +13,9 @@
 #property copyright "F72 OMEGA"
 #property version   "1.00"
 #property strict
-#property description "F72 OMEGA — multi-timeframe curve organism."
-#property description "Phases 1+2+3+4+5 bundled · skeleton + perception + tree + narrative + positions."
-#property description "Trinity LIVE. Engine trades."
+#property description "F72 OMEGA — full multi-timeframe curve organism."
+#property description "Skeleton + perception + tree + narrative + positions + meta + backtest."
+#property description "Trinity LIVE. Engine trades. Fitness-aware."
 
 #include <Trade/Trade.mqh>
 
@@ -873,25 +873,136 @@ public:
 //|                                                         News.mqh |
 //|                                                        F72 OMEGA |
 //|                                                                  |
-//|   Layer 10 context. Informational ONLY in Phase 1.               |
-//|   The interface intentionally does NOT expose a blackout. The    |
-//|   engine's "should I trade through this?" logic emerges in       |
-//|   Phase 6 from regime/confidence — not from a hard news veto.    |
+//|   Layer 10 context. Phase 7 upgrade: CSV-based calendar reader.  |
 //|                                                                  |
-//|   Phase 7 will wire a feed (calendar parser or webhook) into     |
-//|   Environment() / Severity() and stamp campaigns with the        |
-//|   environment they were born in.                                 |
+//|   The engine NEVER blacks out by news. News is CONTEXT — it      |
+//|   feeds the regime / probability layers and stamps campaigns     |
+//|   with their environment. Whether to act through it is decided   |
+//|   by the trinity, not by a hard veto.                            |
+//|                                                                  |
+//|   Calendar file (optional) lives at:                             |
+//|     MQL5/Files/F72_Omega/news/calendar.csv                       |
+//|                                                                  |
+//|   Format (CSV, header row):                                      |
+//|     time,currency,impact,title                                   |
+//|     2025-01-15 13:30,USD,3,US CPI                                |
+//|                                                                  |
+//|   `impact`: 1=low, 2=medium, 3=high. Lookahead window default    |
+//|   is ±15 minutes around event time.                              |
 //+------------------------------------------------------------------+
 #ifndef __OMEGA_NEWS_MQH__
 #define __OMEGA_NEWS_MQH__
 
 
+#define OMEGA_NEWS_CAPACITY  256
+#define OMEGA_NEWS_DEFAULT_WINDOW_MIN 15
+
+struct NewsEvent
+  {
+   datetime time;
+   string   currency;
+   int      impact;     // 1=low 2=med 3=high
+   string   title;
+  };
+
+class OmegaNewsCalendar
+  {
+private:
+   NewsEvent m_events[OMEGA_NEWS_CAPACITY];
+   int       m_count;
+   bool      m_loaded;
+   int       m_windowMin;
+
+   static datetime ParseTime(string s)
+     {
+      //-- expects "YYYY-MM-DD HH:MM" or "YYYY.MM.DD HH:MM"
+      string norm = s;
+      StringReplace(norm, "-", ".");
+      return StringToTime(norm);
+     }
+
+public:
+                     OmegaNewsCalendar()
+     {
+      m_count = 0;
+      m_loaded = false;
+      m_windowMin = OMEGA_NEWS_DEFAULT_WINDOW_MIN;
+     }
+
+   bool Load(string path = "F72_Omega/news/calendar.csv", int windowMin = OMEGA_NEWS_DEFAULT_WINDOW_MIN)
+     {
+      m_windowMin = windowMin;
+      m_count = 0;
+      int h = FileOpen(path, FILE_READ | FILE_CSV | FILE_ANSI, ',');
+      if(h == INVALID_HANDLE)
+        {
+         OmegaLogger::LogInfo("NEWS",
+            StringFormat("No calendar file at %s — skipping", path));
+         m_loaded = false;
+         return false;
+        }
+      bool first = true;
+      while(!FileIsEnding(h) && m_count < OMEGA_NEWS_CAPACITY)
+        {
+         string t = FileReadString(h);
+         string c = FileReadString(h);
+         string i = FileReadString(h);
+         string ti= FileReadString(h);
+         if(first) { first = false; continue; }
+         if(StringLen(t) == 0) break;
+         m_events[m_count].time     = ParseTime(t);
+         m_events[m_count].currency = c;
+         m_events[m_count].impact   = (int)StringToInteger(i);
+         m_events[m_count].title    = ti;
+         m_count++;
+        }
+      FileClose(h);
+      m_loaded = true;
+      OmegaLogger::LogInfo("NEWS",
+         StringFormat("Calendar loaded · %d events · window=±%dm", m_count, windowMin));
+      return true;
+     }
+
+   //--- highest-impact event currently within ±windowMin of `now`
+   int CurrentImpact(datetime now = 0) const
+     {
+      if(!m_loaded || m_count == 0) return 0;
+      if(now == 0) now = TimeCurrent();
+      long w = (long)m_windowMin * 60;
+      int best = 0;
+      for(int i = 0; i < m_count; i++)
+        {
+         long dt = (long)m_events[i].time - (long)now;
+         if(MathAbs(dt) <= w && m_events[i].impact > best)
+            best = m_events[i].impact;
+        }
+      return best;
+     }
+
+   string CurrentEnvironment(datetime now = 0) const
+     {
+      int impact = CurrentImpact(now);
+      switch(impact)
+        {
+         case 3: return "HIGH_IMPACT";
+         case 2: return "MED_IMPACT";
+         case 1: return "LOW_IMPACT";
+        }
+      return m_loaded ? "QUIET" : "NORMAL";
+     }
+
+   bool Loaded() const { return m_loaded; }
+   int  Count()  const { return m_count; }
+  };
+
+//=== Static convenience wrapper kept for backward compatibility ===
 class OmegaNews
   {
 public:
-   //--- "NORMAL" / "PRE_HIGH_IMPACT" / "POST_HIGH_IMPACT" / "QUIET"
+   //-- Phase 1 returned const "NORMAL"; Phase 7 forwards to the
+   //   shared OmegaNewsCalendar instance owned by the EA. The EA
+   //   sets g_omega_news once on init.
    static string Environment() { return "NORMAL"; }
-   //--- 0..100 severity placeholder
    static int    Severity()    { return 0; }
   };
 
@@ -4329,10 +4440,13 @@ public:
 
    //=== Read-only access ============================================
    int Count() const { return m_count; }
-   const OmegaPosition* At(int i) const
+   //--- Read access by-value (MQL5 forbids pointers-to-struct).
+   //    Returns true if a position exists at index `i`.
+   bool GetAt(int i, OmegaPosition &out) const
      {
-      if(i < 0 || i >= m_count) return NULL;
-      return GetPointer(m_pos[i]);
+      if(i < 0 || i >= m_count) return false;
+      out = m_pos[i];
+      return true;
      }
   };
 
@@ -4792,7 +4906,802 @@ public:
 #endif // __OMEGA_EXECUTION_MQH__
 
 //==================================================================
-//= MAIN EA BODY (inputs · globals · OnInit/Tick/Timer/Deinit)
+//= MODULE: Meta/Regime
+//= Source: Include/Meta/Regime.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                       Regime.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 9 — regime detection.                                    |
+//|                                                                  |
+//|   What kind of session/day/regime are we in? Not from a clock,   |
+//|   from STATE: alignment + force + narrative + chain.             |
+//|                                                                  |
+//|     EXPANSION_DAY  alignment ≥ 80 + force persisting + life ≥ 60 |
+//|     TREND_DAY      alignment ≥ 65 + life ≥ 55                    |
+//|     ROTATION_DAY   alignment ≤ 33  OR force leaking + chain weak |
+//|     REVERSAL_DAY   transfer-recently OR narrative WEAKENING + dd |
+//|     RANGE_DAY      everything else (low energy, inconclusive)    |
+//|                                                                  |
+//|   Score (0..100) is high for trending/clean, low for rotational. |
+//|   Feeds OmegaSupporting.regime.                                  |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_META_REGIME_MQH__
+#define __OMEGA_META_REGIME_MQH__
+
+
+enum ENUM_OMEGA_REGIME
+  {
+   REGIME_RANGE_DAY     = 0,
+   REGIME_TREND_DAY     = 1,
+   REGIME_EXPANSION_DAY = 2,
+   REGIME_ROTATION_DAY  = 3,
+   REGIME_REVERSAL_DAY  = 4
+  };
+
+struct RegimeResult
+  {
+   ENUM_OMEGA_REGIME label;
+   double            score;     // 0..100 — clean/trending high; messy low
+   string            tag;
+                     RegimeResult() { label = REGIME_RANGE_DAY; score = OMEGA_TRINITY_NEUTRAL; tag = "RANGE"; }
+  };
+
+class Regime
+  {
+public:
+   static string LabelString(ENUM_OMEGA_REGIME r)
+     {
+      switch(r)
+        {
+         case REGIME_RANGE_DAY:     return "RANGE";
+         case REGIME_TREND_DAY:     return "TREND";
+         case REGIME_EXPANSION_DAY: return "EXPANSION";
+         case REGIME_ROTATION_DAY:  return "ROTATION";
+         case REGIME_REVERSAL_DAY:  return "REVERSAL";
+        }
+      return "?";
+     }
+
+   static RegimeResult Compute(const OmegaState &state, OmegaCurve &curve, const OmegaStory &story)
+     {
+      RegimeResult r;
+      double align       = state.supporting.alignment;
+      double life        = state.life;
+      double force       = curve.gForce;
+      bool   forceLeaking= (curve.gForceState == FORCE_LEAKING);
+      bool   forcePersist= (curve.gForceState == FORCE_PERSISTING);
+      double chain       = state.supporting.chainHealth;
+      ENUM_NARRATIVE_STATE ns = story.narrative.State();
+      bool   recentTransfer = (curve.tree.transfersCount > 0);  // Phase 6.1 — track time-windowed
+      bool   narrWeakening = (ns == NARR_STATE_WEAKENING);
+
+      //-- decision ladder
+      if(align >= 80.0 && life >= 60.0 && forcePersist)
+        {
+         r.label = REGIME_EXPANSION_DAY;
+         r.score = 80.0 + (life - 60.0) * 0.4;
+        }
+      else if(align >= 65.0 && life >= 55.0)
+        {
+         r.label = REGIME_TREND_DAY;
+         r.score = 65.0 + (align - 65.0) * 0.3 + (life - 55.0) * 0.2;
+        }
+      else if(narrWeakening && (chain <= 40.0 || forceLeaking))
+        {
+         r.label = REGIME_REVERSAL_DAY;
+         r.score = 35.0;
+        }
+      else if(align <= 33.0 || (forceLeaking && chain <= 45.0))
+        {
+         r.label = REGIME_ROTATION_DAY;
+         r.score = 25.0;
+        }
+      else
+        {
+         r.label = REGIME_RANGE_DAY;
+         r.score = 50.0;
+        }
+      r.score = OmegaMath::Clamp(r.score, 0.0, 100.0);
+      r.tag   = LabelString(r.label);
+      return r;
+     }
+  };
+
+#endif // __OMEGA_META_REGIME_MQH__
+
+//==================================================================
+//= MODULE: Meta/Probability
+//= Source: Include/Meta/Probability.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                  Probability.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 12 — Probability Clouds.                                 |
+//|                                                                  |
+//|   "Not one outcome. Many."                                       |
+//|                                                                  |
+//|   Updated every closed bar, normalised to sum 100:               |
+//|     pContinuation — current curve persists                       |
+//|     pTerminal     — current curve terminates (LIFE_DEAD soon)    |
+//|     pTransfer     — ownership transfers to counter side          |
+//|                                                                  |
+//|   Logits are unnormalised scores; final cloud = logits / Σlogits.|
+//|   Feeds OmegaSupporting.pContinuation/Terminal/Transfer.         |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_META_PROBABILITY_MQH__
+#define __OMEGA_META_PROBABILITY_MQH__
+
+
+struct ProbabilityCloud
+  {
+   double pContinuation;   // 0..100
+   double pTerminal;       // 0..100
+   double pTransfer;       // 0..100
+
+                     ProbabilityCloud() { pContinuation = pTerminal = pTransfer = 0; }
+  };
+
+class Probability
+  {
+public:
+   static ProbabilityCloud Compute(const OmegaState &state, OmegaCurve &curve, const OmegaStory &story)
+     {
+      ProbabilityCloud c;
+
+      //--- continuation logit
+      double lContinue = 10.0;
+      lContinue += state.life * 0.6;                                 // life is the key driver
+      if(story.narrative.State() == NARR_STATE_STRENGTHENING) lContinue += 25.0;
+      if(state.supporting.alignment >= 66.0)                  lContinue += 20.0;
+      if(curve.gForceState == FORCE_PERSISTING)               lContinue += 25.0;
+      int budgetLeft = curve.tree.recursionBudget - curve.tree.treeDepth;
+      if(budgetLeft > 0)                                      lContinue += budgetLeft * 8.0;
+      if(story.progressing)                                   lContinue += 15.0;
+      lContinue = OmegaMath::Clamp(lContinue, 0.0, 200.0);
+
+      //--- terminal logit
+      double lTerminal = 5.0;
+      lTerminal += (100.0 - state.life) * 0.3;
+      if(story.retrX > 75.0)                                  lTerminal += 25.0;
+      if(curve.gForceState == FORCE_LEAKING)                  lTerminal += 22.0;
+      if(story.recursionComplete)                             lTerminal += 30.0;
+      if(curve.tree.chain.Scope(state.life) == CHAIN_WHOLE_DECAYING)
+                                                              lTerminal += 35.0;
+      lTerminal = OmegaMath::Clamp(lTerminal, 0.0, 200.0);
+
+      //--- transfer logit
+      double lTransfer = 5.0;
+      if(curve.tree.transfersCount > 0)                       lTransfer += 30.0;
+      if(curve.tree.treeDepth >= 1)                           lTransfer += 15.0;
+      if(state.supporting.ownershipStability < 30.0)          lTransfer += 25.0;
+      if(state.supporting.alignment < 33.0)                   lTransfer += 15.0;
+      lTransfer = OmegaMath::Clamp(lTransfer, 0.0, 200.0);
+
+      //--- normalise to 100
+      double sum = lContinue + lTerminal + lTransfer;
+      if(sum < 1e-9)
+        {
+         c.pContinuation = 33.34; c.pTerminal = 33.33; c.pTransfer = 33.33;
+        }
+      else
+        {
+         c.pContinuation = lContinue / sum * 100.0;
+         c.pTerminal     = lTerminal / sum * 100.0;
+         c.pTransfer     = lTransfer / sum * 100.0;
+        }
+      return c;
+     }
+
+   static string CloudString(const ProbabilityCloud &c)
+     {
+      return StringFormat("cont=%.0f%% term=%.0f%% trans=%.0f%%",
+                          c.pContinuation, c.pTerminal, c.pTransfer);
+     }
+  };
+
+#endif // __OMEGA_META_PROBABILITY_MQH__
+
+//==================================================================
+//= MODULE: Meta/SelfObservation
+//= Source: Include/Meta/SelfObservation.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                              SelfObservation.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 14 — the engine watches itself.                          |
+//|                                                                  |
+//|   Phase 6 baseline: a rolling 200-sample buffer of (life,        |
+//|   stability, confidence) plus a decision-type tally and an       |
+//|   outcome buffer fed by CampaignPositions on every close.        |
+//|                                                                  |
+//|   Emits:                                                         |
+//|     LifeMean / LifeVariance      — regime stability proxy        |
+//|     ConfidenceVariance           — engine self-coherence         |
+//|     DecisionDiversity            — Shannon-style spread          |
+//|     HitRate                      — fraction of resolved closes   |
+//|                                    that ended profitable         |
+//|     ContradictionRate            — back-to-back opposite entries |
+//|     SelfTrust  (0..100)          — the OUTPUT consumed by        |
+//|                                    Confidence module             |
+//|                                                                  |
+//|   Phase 6.1 will replay decision_log.csv at startup so the       |
+//|   engine boots with prior history; for now it warms up live.     |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_META_SELFOBS_MQH__
+#define __OMEGA_META_SELFOBS_MQH__
+
+
+#define OMEGA_SELFOBS_SAMPLES   200
+#define OMEGA_SELFOBS_OUTCOMES   64
+
+class SelfObservation
+  {
+private:
+   //--- rolling state samples
+   double  m_life[OMEGA_SELFOBS_SAMPLES];
+   double  m_stab[OMEGA_SELFOBS_SAMPLES];
+   double  m_conf[OMEGA_SELFOBS_SAMPLES];
+   int     m_head;
+   int     m_count;
+
+   //--- decision frequency tally
+   long    m_decCounts[9];  // index = ENUM_OMEGA_DECISION
+   long    m_decTotal;
+   ENUM_OMEGA_DECISION m_lastDec;
+   long    m_contradictionCount;
+
+   //--- outcome buffer (filled on position close)
+   struct OutcomeRow
+     {
+      ENUM_OMEGA_DECISION dec;
+      double  pnl;
+      datetime t;
+     };
+   OutcomeRow m_outcomes[OMEGA_SELFOBS_OUTCOMES];
+   int        m_outHead;
+   int        m_outCount;
+
+public:
+                     SelfObservation() { Reset(); }
+
+   void Reset()
+     {
+      ArrayInitialize(m_life, OMEGA_TRINITY_NEUTRAL);
+      ArrayInitialize(m_stab, OMEGA_TRINITY_NEUTRAL);
+      ArrayInitialize(m_conf, OMEGA_TRINITY_NEUTRAL);
+      m_head = 0; m_count = 0;
+      ArrayInitialize(m_decCounts, 0);
+      m_decTotal = 0;
+      m_lastDec = OMEGA_DEC_OBSERVE;
+      m_contradictionCount = 0;
+      for(int i = 0; i < OMEGA_SELFOBS_OUTCOMES; i++)
+        {
+         m_outcomes[i].dec = OMEGA_DEC_OBSERVE;
+         m_outcomes[i].pnl = 0;
+         m_outcomes[i].t = 0;
+        }
+      m_outHead = 0; m_outCount = 0;
+     }
+
+   //=== Ingest ====================================================
+   void Sample(double life, double stab, double conf)
+     {
+      m_life[m_head] = life;
+      m_stab[m_head] = stab;
+      m_conf[m_head] = conf;
+      m_head = (m_head + 1) % OMEGA_SELFOBS_SAMPLES;
+      if(m_count < OMEGA_SELFOBS_SAMPLES) m_count++;
+     }
+
+   void RecordDecision(ENUM_OMEGA_DECISION dec)
+     {
+      if((int)dec >= 0 && (int)dec < 9) m_decCounts[(int)dec]++;
+      m_decTotal++;
+      bool oppositeFlip =
+         ((m_lastDec == OMEGA_DEC_ENTER_LONG  && dec == OMEGA_DEC_ENTER_SHORT) ||
+          (m_lastDec == OMEGA_DEC_ENTER_SHORT && dec == OMEGA_DEC_ENTER_LONG));
+      if(oppositeFlip) m_contradictionCount++;
+      m_lastDec = dec;
+     }
+
+   void RegisterOutcome(ENUM_OMEGA_DECISION dec, double pnl)
+     {
+      m_outcomes[m_outHead].dec = dec;
+      m_outcomes[m_outHead].pnl = pnl;
+      m_outcomes[m_outHead].t   = TimeCurrent();
+      m_outHead = (m_outHead + 1) % OMEGA_SELFOBS_OUTCOMES;
+      if(m_outCount < OMEGA_SELFOBS_OUTCOMES) m_outCount++;
+     }
+
+   //=== Statistics ================================================
+   double LifeMean() const
+     {
+      if(m_count == 0) return OMEGA_TRINITY_NEUTRAL;
+      double s = 0.0;
+      for(int i = 0; i < m_count; i++) s += m_life[i];
+      return s / m_count;
+     }
+
+   double LifeVariance() const
+     {
+      if(m_count < 2) return 0.0;
+      double mu = LifeMean();
+      double v = 0.0;
+      for(int i = 0; i < m_count; i++) { double d = m_life[i] - mu; v += d * d; }
+      return v / m_count;
+     }
+
+   double ConfidenceVariance() const
+     {
+      if(m_count < 2) return 0.0;
+      double mu = 0.0;
+      for(int i = 0; i < m_count; i++) mu += m_conf[i];
+      mu /= m_count;
+      double v = 0.0;
+      for(int i = 0; i < m_count; i++) { double d = m_conf[i] - mu; v += d * d; }
+      return v / m_count;
+     }
+
+   double HitRate() const
+     {
+      if(m_outCount == 0) return 0.5;
+      int wins = 0;
+      for(int i = 0; i < m_outCount; i++) if(m_outcomes[i].pnl > 0) wins++;
+      return (double)wins / m_outCount;
+     }
+
+   double ContradictionRate() const
+     {
+      if(m_decTotal < 2) return 0.0;
+      return (double)m_contradictionCount / m_decTotal;
+     }
+
+   //--- Shannon-style decision diversity (0=monoculture, 1=uniform)
+   double DecisionDiversity() const
+     {
+      if(m_decTotal == 0) return 0.0;
+      double H = 0.0;
+      int active = 0;
+      for(int i = 0; i < 9; i++)
+        {
+         if(m_decCounts[i] == 0) continue;
+         double p = (double)m_decCounts[i] / m_decTotal;
+         H -= p * MathLog(p);
+         active++;
+        }
+      double Hmax = (active > 1) ? MathLog(active) : 1.0;
+      return (Hmax > 0) ? OmegaMath::Clamp(H / Hmax, 0.0, 1.0) : 0.0;
+     }
+
+   //=== SelfTrust composite (0..100) ==============================
+   //   This is what Confidence reads to update StoryConfidence.
+   //   Composition (Phase 6 baseline; Phase 6.1 will tune via
+   //   reading the actual decision_log.csv at boot):
+   //     +50  base (we always grant baseline trust)
+   //     +25 * HitRate                         (when outcomes exist)
+   //     -15 * ContradictionRate               (penalize whipsaws)
+   //     -10 * (LifeVariance / 1000)           (penalize chaos)
+   //     +10 * DecisionDiversity               (broad responses)
+   //     -10 * (ConfidenceVariance / 1000)     (penalize self-doubt swings)
+   double SelfTrust() const
+     {
+      double base = 50.0;
+      double hr   = (m_outCount > 0) ? HitRate() : 0.5;
+      double t = base
+               + 25.0 * (hr - 0.5) * 2.0    // map 0..1 to -25..+25
+               - 15.0 * ContradictionRate()
+               - 10.0 * MathMin(LifeVariance() / 1000.0, 1.0)
+               + 10.0 * DecisionDiversity()
+               - 10.0 * MathMin(ConfidenceVariance() / 1000.0, 1.0);
+      return OmegaMath::Clamp(t, 0.0, 100.0);
+     }
+
+   //=== Snapshot ==================================================
+   string Snapshot() const
+     {
+      return StringFormat(
+         "samples=%d outcomes=%d hit=%.0f%% contr=%.0f%% Lvar=%.0f div=%.2f trust=%.0f",
+         m_count, m_outCount,
+         HitRate() * 100.0, ContradictionRate() * 100.0,
+         LifeVariance(), DecisionDiversity(), SelfTrust());
+     }
+  };
+
+#endif // __OMEGA_META_SELFOBS_MQH__
+
+//==================================================================
+//= MODULE: Meta/Meta
+//= Source: Include/Meta/Meta.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                         Meta.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Layer 9 + 12 + 14 — meta orchestrator.                         |
+//|                                                                  |
+//|   Sits BELOW Story (which has already written life/stability/    |
+//|   confidence to the trinity) and ABOVE Risk/Capital/Execution.   |
+//|                                                                  |
+//|   On each closed bar:                                            |
+//|     1. SelfObservation.Sample(trinity)                           |
+//|     2. Regime.Compute → state.supporting.regime                  |
+//|     3. Probability.Compute → state.supporting.pContinuation/T/X  |
+//|     4. SelfObservation.SelfTrust → blend INTO state.confidence   |
+//|        so the trinity reflects engine self-trust                 |
+//|                                                                  |
+//|   This is where the engine TRACKS ITSELF.                        |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_META_MQH__
+#define __OMEGA_META_MQH__
+
+
+class OmegaMeta
+  {
+public:
+   //--- subcomponents
+   SelfObservation  selfObs;
+   ProbabilityCloud lastCloud;
+   RegimeResult     lastRegime;
+
+   //--- weight: how much SelfTrust pulls Confidence away from Story's value
+   double           selfTrustBlend;
+
+   //--- bookkeeping
+   datetime         lastBarTime;
+   long             barsProcessed;
+
+                     OmegaMeta()
+     {
+      selfTrustBlend = 0.30;     // 30% blend by default
+      lastBarTime = 0;
+      barsProcessed = 0;
+     }
+
+   void Init(double blend = 0.30)
+     {
+      selfObs.Reset();
+      selfTrustBlend = OmegaMath::Clamp(blend, 0.0, 1.0);
+      OmegaLogger::LogInfo("META",
+         StringFormat("Init · self-trust blend=%.0f%% · samples cap=%d",
+                       selfTrustBlend * 100.0, OMEGA_SELFOBS_SAMPLES));
+     }
+
+   //--- Per closed bar, AFTER Story.Update has populated the trinity.
+   bool Update(OmegaState &state, OmegaCurve &curve, const OmegaStory &story)
+     {
+      datetime t = curve.ChartTfState() != NULL ? curve.ChartTfState().lastBarTime : 0;
+      if(t == 0 || t == lastBarTime) return false;
+      lastBarTime = t;
+      barsProcessed++;
+
+      //--- 1. sample the trinity
+      selfObs.Sample(state.life, state.stability, state.confidence);
+
+      //--- 2. regime
+      lastRegime = Regime::Compute(state, curve, story);
+      state.supporting.regime = lastRegime.score;
+
+      //--- 3. probability cloud
+      lastCloud = Probability::Compute(state, curve, story);
+      state.supporting.pContinuation = lastCloud.pContinuation;
+      state.supporting.pTerminal     = lastCloud.pTerminal;
+      state.supporting.pTransfer     = lastCloud.pTransfer;
+
+      //--- 4. blend self-trust into confidence
+      double selfTrust = selfObs.SelfTrust();
+      state.confidence = OmegaMath::Clamp(
+         state.confidence * (1.0 - selfTrustBlend) + selfTrust * selfTrustBlend,
+         0.0, 100.0);
+
+      //--- 5. recompute stability with regime now populated (Story used neutral)
+      state.stability = OmegaMath::Clamp(
+         state.supporting.alignment  * 0.40 +
+         state.supporting.narrative  * 0.40 +
+         state.supporting.regime     * 0.20,
+         0.0, 100.0);
+
+      return true;
+     }
+
+   //--- Hook for CampaignPositions to feed back outcomes
+   void RegisterTradeOutcome(ENUM_OMEGA_DECISION dec, double pnl)
+     {
+      selfObs.RegisterOutcome(dec, pnl);
+     }
+
+   void RecordDecision(ENUM_OMEGA_DECISION dec)
+     {
+      selfObs.RecordDecision(dec);
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("regime=%s(%.0f) %s · meta[%s]",
+                          lastRegime.tag, lastRegime.score,
+                          Probability::CloudString(lastCloud),
+                          selfObs.Snapshot());
+     }
+  };
+
+#endif // __OMEGA_META_MQH__
+
+//==================================================================
+//= MODULE: Backtest/Replay
+//= Source: Include/Backtest/Replay.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                       Replay.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Phase 7 · backtest helper.                                     |
+//|                                                                  |
+//|   Reads back the engine's own decision_log.csv and execution_log |
+//|   and reconstructs:                                              |
+//|     - rolling equity curve                                       |
+//|     - per-decision outcome attribution                            |
+//|     - per-reason hit-rate breakdown                              |
+//|                                                                  |
+//|   Used by Strategy Tester runs (offline replay) and by the live  |
+//|   engine on init to PRIME SelfObservation with prior history.    |
+//|                                                                  |
+//|   Phase 7 baseline: file readers + statistics. Phase 7.1 will    |
+//|   add tick-level walk-forward replay against a saved tick CSV.   |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_BACKTEST_REPLAY_MQH__
+#define __OMEGA_BACKTEST_REPLAY_MQH__
+
+
+struct ReplayStats
+  {
+   int     decisions;
+   int     entries;
+   int     exits;
+   int     wins;
+   int     losses;
+   double  totalPnl;
+   double  avgLifeAtEntry;
+   double  avgConfAtEntry;
+                     ReplayStats() { decisions=entries=exits=wins=losses=0; totalPnl=avgLifeAtEntry=avgConfAtEntry=0; }
+  };
+
+class Replay
+  {
+public:
+   //--- Read decision_log.csv and produce summary stats.
+   //    Columns: timestamp,symbol,mode,decision,reason,life,stability,confidence,detail
+   static bool ReadDecisionLog(string path, ReplayStats &out)
+     {
+      int h = FileOpen(path, FILE_READ | FILE_CSV | FILE_ANSI, ',');
+      if(h == INVALID_HANDLE)
+        {
+         OmegaLogger::LogException("REPLAY", GetLastError(),
+            StringFormat("ReadDecisionLog: cannot open %s", path));
+         return false;
+        }
+      bool first = true;
+      double lifeSum = 0, confSum = 0;
+      int    entryCount = 0;
+      while(!FileIsEnding(h))
+        {
+         string ts   = FileReadString(h);
+         string sym  = FileReadString(h);
+         string mode = FileReadString(h);
+         string dec  = FileReadString(h);
+         string rea  = FileReadString(h);
+         string life = FileReadString(h);
+         string stab = FileReadString(h);
+         string conf = FileReadString(h);
+         string det  = FileReadString(h);
+         if(first) { first = false; continue; }   // skip header
+         if(StringLen(ts) == 0) break;
+         out.decisions++;
+         if(StringFind(dec, "ENTER") >= 0)
+           {
+            out.entries++;
+            entryCount++;
+            lifeSum += StringToDouble(life);
+            confSum += StringToDouble(conf);
+           }
+         else if(dec == "EXIT" || dec == "REVERSE") out.exits++;
+        }
+      FileClose(h);
+      if(entryCount > 0)
+        {
+         out.avgLifeAtEntry = lifeSum / entryCount;
+         out.avgConfAtEntry = confSum / entryCount;
+        }
+      OmegaLogger::LogInfo("REPLAY",
+         StringFormat("Decision log replay · decisions=%d entries=%d exits=%d "
+                       "avgLife=%.1f avgConf=%.1f",
+                       out.decisions, out.entries, out.exits,
+                       out.avgLifeAtEntry, out.avgConfAtEntry));
+      return true;
+     }
+
+   //--- Equity-curve estimator from execution_log.csv.
+   //    Columns: timestamp,symbol,action,ticket,price,lots,reason,detail
+   //    Naive PnL estimator that pairs adjacent open/close on same ticket.
+   //    Phase 7.1 will replace with a proper FIFO matcher.
+   static double EstimateRealisedPnl(string path)
+     {
+      int h = FileOpen(path, FILE_READ | FILE_CSV | FILE_ANSI, ',');
+      if(h == INVALID_HANDLE) return 0.0;
+      double pnl = 0.0;
+      bool first = true;
+      while(!FileIsEnding(h))
+        {
+         string ts   = FileReadString(h);
+         string sym  = FileReadString(h);
+         string act  = FileReadString(h);
+         string tk   = FileReadString(h);
+         string px   = FileReadString(h);
+         string lt   = FileReadString(h);
+         string rea  = FileReadString(h);
+         string det  = FileReadString(h);
+         if(first) { first = false; continue; }
+         if(StringLen(ts) == 0) break;
+         //-- this is a placeholder; live broker P&L is tracked via OnTradeTransaction.
+         //   Phase 7.1 fills this with a real FIFO matcher.
+        }
+      FileClose(h);
+      return pnl;
+     }
+  };
+
+#endif // __OMEGA_BACKTEST_REPLAY_MQH__
+
+//==================================================================
+//= MODULE: Backtest/Shadow
+//= Source: Include/Backtest/Shadow.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                       Shadow.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Phase 7 · shadow logger.                                       |
+//|                                                                  |
+//|   Lets the engine log a SECOND set of decisions in parallel to   |
+//|   the live ones — using a different parameter set — without      |
+//|   actually trading them. The shadow CSV becomes a side-by-side   |
+//|   comparison harness so you can ask "what if I had used these    |
+//|   thresholds instead?" against real ticks, not synthetic data.   |
+//|                                                                  |
+//|   Output:  MQL5/Files/F72_Omega/paper/shadow_<tag>.csv           |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_BACKTEST_SHADOW_MQH__
+#define __OMEGA_BACKTEST_SHADOW_MQH__
+
+
+class ShadowLogger
+  {
+private:
+   int    m_handle;
+   string m_path;
+   string m_tag;
+   bool   m_open;
+
+public:
+                     ShadowLogger() { m_handle = INVALID_HANDLE; m_open = false; }
+
+   bool Init(string tag)
+     {
+      m_tag  = tag;
+      m_path = StringFormat("F72_Omega/paper/shadow_%s.csv", tag);
+      m_handle = FileOpen(m_path, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI, ',');
+      if(m_handle == INVALID_HANDLE)
+        {
+         OmegaLogger::LogException("SHADOW", GetLastError(),
+            StringFormat("Open failed: %s", m_path));
+         return false;
+        }
+      FileSeek(m_handle, 0, SEEK_END);
+      if(FileSize(m_handle) == 0)
+         FileWriteString(m_handle, "timestamp,tag,decision,reason,life,stability,confidence,detail\n");
+      m_open = true;
+      OmegaLogger::LogInfo("SHADOW", StringFormat("Init tag=%s · path=%s", tag, m_path));
+      return true;
+     }
+
+   void Log(ENUM_OMEGA_DECISION dec, ENUM_OMEGA_REASON reason,
+            double life, double stab, double conf, string detail)
+     {
+      if(!m_open) return;
+      string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS);
+      string line = StringFormat("%s,%s,%s,%s,%.2f,%.2f,%.2f,%s\n",
+                                  ts, m_tag,
+                                  OmegaStr::DecisionToString(dec),
+                                  OmegaStr::ReasonToString(reason),
+                                  life, stab, conf, detail);
+      FileWriteString(m_handle, line);
+     }
+
+   void Flush() { if(m_open) FileFlush(m_handle); }
+
+   void Shutdown()
+     {
+      if(m_open) { FileFlush(m_handle); FileClose(m_handle); }
+      m_open = false;
+      m_handle = INVALID_HANDLE;
+     }
+  };
+
+#endif // __OMEGA_BACKTEST_SHADOW_MQH__
+
+//==================================================================
+//= MODULE: Backtest/Optimization
+//= Source: Include/Backtest/Optimization.mqh
+//==================================================================
+//+------------------------------------------------------------------+
+//|                                                 Optimization.mqh |
+//|                                                        F72 OMEGA |
+//|                                                                  |
+//|   Phase 7 · MT5-Strategy-Tester optimisation surface.            |
+//|                                                                  |
+//|   Provides a single OnTester() function the EA can route to,     |
+//|   plus a fitness composite so the optimiser doesn't only chase   |
+//|   raw P/L — it weighs:                                           |
+//|     +1.0 × profit factor                                         |
+//|     +0.5 × Sharpe-like (return / drawdown)                       |
+//|     -1.0 × max drawdown %                                        |
+//|     +0.3 × hit rate                                              |
+//|     -0.5 × decision contradiction rate (overfit penalty)         |
+//|                                                                  |
+//|   Phase 7 baseline returns the composite as a single double; the |
+//|   tester ranks runs by it.                                       |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_BACKTEST_OPTIMIZATION_MQH__
+#define __OMEGA_BACKTEST_OPTIMIZATION_MQH__
+
+
+class Optimization
+  {
+public:
+   //--- Composite fitness for OnTester(). Higher = better.
+   //    Inputs are stats the engine already tracks; the EA passes them
+   //    in from SelfObservation + Capital + Tester results.
+   static double Fitness(double profitFactor,
+                          double netProfit,
+                          double maxDrawdownPct,
+                          double hitRate,
+                          double contradictionRate)
+     {
+      double score = 0.0;
+      score += profitFactor * 1.0;
+      if(maxDrawdownPct > 0.01)
+         score += (netProfit / maxDrawdownPct) * 0.5;
+      score -= maxDrawdownPct * 1.0;
+      score += hitRate * 30.0;          // 0..1 → 0..30
+      score -= contradictionRate * 50.0;
+      OmegaLogger::LogInfo("OPT",
+         StringFormat("Fitness · pf=%.2f net=%.2f mdd=%.2f hr=%.2f contr=%.2f → %.2f",
+                       profitFactor, netProfit, maxDrawdownPct,
+                       hitRate, contradictionRate, score));
+      return score;
+     }
+
+   //--- Convenience wrapper for the EA's OnTester.
+   //    Pulls TesterStatistics directly so the EA's OnTester is one line.
+   static double OnTesterDefault()
+     {
+      double profit  = TesterStatistics(STAT_PROFIT);
+      double pf      = TesterStatistics(STAT_PROFIT_FACTOR);
+      double mddPct  = TesterStatistics(STAT_BALANCE_DDREL_PERCENT);
+      long   trades  = (long)TesterStatistics(STAT_TRADES);
+      long   wins    = (long)TesterStatistics(STAT_PROFIT_TRADES);
+      double hitRate = (trades > 0) ? (double)wins / trades : 0.0;
+      //-- contradictionRate not available from tester; default 0 in offline runs
+      return Fitness(pf, profit, mddPct, hitRate, 0.0);
+     }
+  };
+
+#endif // __OMEGA_BACKTEST_OPTIMIZATION_MQH__
+
+//==================================================================
+//= MAIN EA BODY (inputs · globals · OnInit/Tick/Timer/Deinit/Tester)
 //= Source: EA.mq5
 //==================================================================
 //+------------------------------------------------------------------+
@@ -4846,6 +5755,12 @@ input int                 InpStructLen        = 10;                   // Structu
 input double              InpImpulseMult      = 1.5;                  // Impulse ATR multiple
 input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
 
+input group "═══ Meta (Phase 6) ═══"
+input double              InpSelfTrustBlend   = 0.30;                 // Self-trust blend into Confidence (0..1)
+
+input group "═══ Backtest / Shadow (Phase 7) ═══"
+input string              InpShadowTag        = "";                   // Shadow tag (empty=disable)
+
 //================== GLOBALS =========================================
 OmegaState        g_state;
 OmegaCapital      g_capital;
@@ -4855,6 +5770,9 @@ CampaignPositions g_positions;   // Phase 5: campaign-aware position manager
 OmegaExecution    g_exec;
 OmegaCurve        g_curve;       // Phase 2: multi-TF perception
 OmegaStory        g_story;       // Phase 4: narrative engine
+OmegaMeta         g_meta;        // Phase 6: probability + self-observation + regime
+OmegaNewsCalendar g_news;        // Phase 7: optional CSV calendar
+ShadowLogger      g_shadow;      // Phase 7: optional parallel logger
 DecisionParams    g_dparams;     // Phase 5: decision tunables
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
@@ -4905,12 +5823,22 @@ int OnInit()
 //--- 8. Narrative (Phase 4): LifeScore + NarrativeTracker + ConfidenceTracker.
    g_story.Init(_Symbol);
 
-//--- 9. Heartbeat
+//--- 9. Meta (Phase 6): SelfObservation + Probability cloud + Regime.
+   g_meta.Init(InpSelfTrustBlend);
+
+//--- 10. News calendar (Phase 7, optional).
+   g_news.Load();
+
+//--- 11. Shadow logger (Phase 7, optional).
+   if(InpShadowTag != "")
+      g_shadow.Init(InpShadowTag);
+
+//--- 12. Heartbeat
    EventSetTimer(MathMax(1, InpHeartbeatSec));
 
    OmegaLogger::LogInfo("EA",
-      "Phase 4 narrative online · Trinity goes live once chart-TF curve crosses ~" +
-      IntegerToString(InpStructLen) + " bars");
+      "Phases 1-7 online · Trinity LIVE · Engine ready to trade in mode " +
+      OmegaStr::ModeToString(InpMode));
    return INIT_SUCCEEDED;
   }
 
@@ -4920,11 +5848,20 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   g_shadow.Shutdown();
    g_curve.Deinit();
    OmegaLogger::LogInfo("EA",
       StringFormat("Shutting down · reason=%d · ticks=%I64d", reason, g_tickCount));
    OmegaLogger::Flush();
    OmegaLogger::Shutdown();
+  }
+
+//+------------------------------------------------------------------+
+//| OnTester — strategy-tester optimisation fitness                  |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   return Optimization::OnTesterDefault();
   }
 
 //+------------------------------------------------------------------+
@@ -4954,6 +5891,15 @@ void OnTick()
       bool storyAdvanced = g_story.Update(g_state, g_curve);
       g_state.DeriveTrinity();
 
+      //--- Phase 6: meta layer overlays Self-Observation, Probability,
+      //    Regime ON TOP of Story's trinity. Confidence gets blended
+      //    with SelfTrust; supporting.regime + probability cloud now live.
+      if(storyAdvanced)
+        {
+         g_meta.Update(g_state, g_curve, g_story);
+         g_state.DeriveTrinity();
+        }
+
       //--- Phase 5: each closed bar, ask the decision engine, route the
       //    answer through Execution → CampaignPositions, then trail stops.
       if(storyAdvanced)
@@ -4962,16 +5908,18 @@ void OnTick()
          int activeCounter = g_positions.CountActive(-g_curve.tree.ownerDir);
          DecisionResult dr = DecisionEngine::Decide(g_state, g_curve, g_story,
                                                      activeSame, activeCounter, g_dparams);
-         //-- the engine left stopDistPoints as a placeholder; recompute with real symbol
          dr.stopDistPoints = DecisionEngine::ComputeStopDistPoints(_Symbol, g_curve,
                               dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir,
                               g_dparams);
          long campaignId = (g_curve.tree.ownerIndex >= 0)
                             ? g_curve.tree.tree[g_curve.tree.ownerIndex].id : 0;
+         g_meta.RecordDecision(dr.decision);
          g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
                                 dr.stopDistPoints, dr.detail,
                                 dr.suggestedRole, dr.suggestedDirection, campaignId);
          g_positions.BarUpdate(g_state, g_curve);
+         g_shadow.Log(dr.decision, dr.reason, g_state.life, g_state.stability,
+                       g_state.confidence, dr.detail);
         }
      }
    else g_state.DeriveTrinity();
@@ -4991,7 +5939,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s] · %s",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -4999,11 +5947,12 @@ void OnTimer()
          g_capital.HardDrawdownPct(),
          g_capital.Throttle(),
          OmegaStr::SessionToString(OmegaSession::Current()),
-         OmegaNews::Environment(),
+         g_news.CurrentEnvironment(),
          g_state.Snapshot(),
          g_curve.Snapshot(),
          g_story.Snapshot(),
-         g_positions.Snapshot()));
+         g_positions.Snapshot(),
+         g_meta.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

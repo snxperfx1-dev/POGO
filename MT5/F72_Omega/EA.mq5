@@ -36,6 +36,10 @@
 #include "Include/News.mqh"
 #include "Include/Curve/Curve.mqh"
 #include "Include/Narrative/Story.mqh"
+#include "Include/Meta/Meta.mqh"
+#include "Include/Backtest/Replay.mqh"
+#include "Include/Backtest/Optimization.mqh"
+#include "Include/Backtest/Shadow.mqh"
 
 //================== INPUTS ==========================================
 input group "═══ Mode (Layer: Human Override Philosophy) ═══"
@@ -71,6 +75,12 @@ input int                 InpStructLen        = 10;                   // Structu
 input double              InpImpulseMult      = 1.5;                  // Impulse ATR multiple
 input double              InpChochBufATR      = 0.75;                 // CHoCH buffer (ATR)
 
+input group "═══ Meta (Phase 6) ═══"
+input double              InpSelfTrustBlend   = 0.30;                 // Self-trust blend into Confidence (0..1)
+
+input group "═══ Backtest / Shadow (Phase 7) ═══"
+input string              InpShadowTag        = "";                   // Shadow tag (empty=disable)
+
 //================== GLOBALS =========================================
 OmegaState        g_state;
 OmegaCapital      g_capital;
@@ -80,6 +90,9 @@ CampaignPositions g_positions;   // Phase 5: campaign-aware position manager
 OmegaExecution    g_exec;
 OmegaCurve        g_curve;       // Phase 2: multi-TF perception
 OmegaStory        g_story;       // Phase 4: narrative engine
+OmegaMeta         g_meta;        // Phase 6: probability + self-observation + regime
+OmegaNewsCalendar g_news;        // Phase 7: optional CSV calendar
+ShadowLogger      g_shadow;      // Phase 7: optional parallel logger
 DecisionParams    g_dparams;     // Phase 5: decision tunables
 datetime       g_lastHeartbeat = 0;
 long           g_tickCount     = 0;
@@ -130,12 +143,22 @@ int OnInit()
 //--- 8. Narrative (Phase 4): LifeScore + NarrativeTracker + ConfidenceTracker.
    g_story.Init(_Symbol);
 
-//--- 9. Heartbeat
+//--- 9. Meta (Phase 6): SelfObservation + Probability cloud + Regime.
+   g_meta.Init(InpSelfTrustBlend);
+
+//--- 10. News calendar (Phase 7, optional).
+   g_news.Load();
+
+//--- 11. Shadow logger (Phase 7, optional).
+   if(InpShadowTag != "")
+      g_shadow.Init(InpShadowTag);
+
+//--- 12. Heartbeat
    EventSetTimer(MathMax(1, InpHeartbeatSec));
 
    OmegaLogger::LogInfo("EA",
-      "Phase 4 narrative online · Trinity goes live once chart-TF curve crosses ~" +
-      IntegerToString(InpStructLen) + " bars");
+      "Phases 1-7 online · Trinity LIVE · Engine ready to trade in mode " +
+      OmegaStr::ModeToString(InpMode));
    return INIT_SUCCEEDED;
   }
 
@@ -145,11 +168,20 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    EventKillTimer();
+   g_shadow.Shutdown();
    g_curve.Deinit();
    OmegaLogger::LogInfo("EA",
       StringFormat("Shutting down · reason=%d · ticks=%I64d", reason, g_tickCount));
    OmegaLogger::Flush();
    OmegaLogger::Shutdown();
+  }
+
+//+------------------------------------------------------------------+
+//| OnTester — strategy-tester optimisation fitness                  |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   return Optimization::OnTesterDefault();
   }
 
 //+------------------------------------------------------------------+
@@ -179,6 +211,15 @@ void OnTick()
       bool storyAdvanced = g_story.Update(g_state, g_curve);
       g_state.DeriveTrinity();
 
+      //--- Phase 6: meta layer overlays Self-Observation, Probability,
+      //    Regime ON TOP of Story's trinity. Confidence gets blended
+      //    with SelfTrust; supporting.regime + probability cloud now live.
+      if(storyAdvanced)
+        {
+         g_meta.Update(g_state, g_curve, g_story);
+         g_state.DeriveTrinity();
+        }
+
       //--- Phase 5: each closed bar, ask the decision engine, route the
       //    answer through Execution → CampaignPositions, then trail stops.
       if(storyAdvanced)
@@ -187,16 +228,18 @@ void OnTick()
          int activeCounter = g_positions.CountActive(-g_curve.tree.ownerDir);
          DecisionResult dr = DecisionEngine::Decide(g_state, g_curve, g_story,
                                                      activeSame, activeCounter, g_dparams);
-         //-- the engine left stopDistPoints as a placeholder; recompute with real symbol
          dr.stopDistPoints = DecisionEngine::ComputeStopDistPoints(_Symbol, g_curve,
                               dr.suggestedDirection != 0 ? dr.suggestedDirection : g_curve.tree.ownerDir,
                               g_dparams);
          long campaignId = (g_curve.tree.ownerIndex >= 0)
                             ? g_curve.tree.tree[g_curve.tree.ownerIndex].id : 0;
+         g_meta.RecordDecision(dr.decision);
          g_exec.HandleDecision(_Symbol, dr.decision, dr.reason, g_state,
                                 dr.stopDistPoints, dr.detail,
                                 dr.suggestedRole, dr.suggestedDirection, campaignId);
          g_positions.BarUpdate(g_state, g_curve);
+         g_shadow.Log(dr.decision, dr.reason, g_state.life, g_state.stability,
+                       g_state.confidence, dr.detail);
         }
      }
    else g_state.DeriveTrinity();
@@ -216,7 +259,7 @@ void OnTimer()
       g_lastHeartbeat = now;
 
       OmegaLogger::LogInfo("HEARTBEAT", StringFormat(
-         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s]",
+         "%s · cap=%s · dd(d/w/hard)=%.2f%%/%.2f%%/%.2f%% · throttle=%.2f · session=%s · news=%s · %s · curve[%s] · story[%s] · pos[%s] · %s",
          _Symbol,
          OmegaStr::CapitalStateToString(g_capital.State()),
          g_capital.DailyDrawdownPct(),
@@ -224,11 +267,12 @@ void OnTimer()
          g_capital.HardDrawdownPct(),
          g_capital.Throttle(),
          OmegaStr::SessionToString(OmegaSession::Current()),
-         OmegaNews::Environment(),
+         g_news.CurrentEnvironment(),
          g_state.Snapshot(),
          g_curve.Snapshot(),
          g_story.Snapshot(),
-         g_positions.Snapshot()));
+         g_positions.Snapshot(),
+         g_meta.Snapshot()));
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once

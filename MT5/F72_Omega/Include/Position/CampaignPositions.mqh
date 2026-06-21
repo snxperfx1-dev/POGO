@@ -339,10 +339,13 @@ public:
 
    //=== Read-only access ============================================
    int Count() const { return m_count; }
-   const OmegaPosition* At(int i) const
+   //--- Read access by-value (MQL5 forbids pointers-to-struct).
+   //    Returns true if a position exists at index `i`.
+   bool GetAt(int i, OmegaPosition &out) const
      {
-      if(i < 0 || i >= m_count) return NULL;
-      return GetPointer(m_pos[i]);
+      if(i < 0 || i >= m_count) return false;
+      out = m_pos[i];
+      return true;
      }
   };
 

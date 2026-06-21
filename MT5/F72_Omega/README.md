@@ -43,8 +43,8 @@ This repo delivers the engine in compile-clean, runnable phases. Each phase plug
 | **3 · Curve tree** | ✅ shipped | `Tree/CurveNode · Ownership · Transfer · Merge · ChainHealth · CurveTree` | Recursive event-spawned tree (root + children to 4-deep, budget set by compression). Ownership-by-energy (Principle 8). Transfer / Merge detection. Rolling chain vitality. Populates ownershipStability, chainHealth, recursionDepth/Budget. Force composite now folds in residualEnergy + recursionDepth from the tree. |
 | **4 · Narrative** | ✅ shipped | `Narrative/LifeScore · Alignment · NarrativeScore · Confidence · Story` | LifeScore via the canonical Pine formula (cpForce + residualEnergy ± retrace bonus ± progressing/recursionComplete penalties). NarrativeTracker votes SUPPORT/DEGRADE on each completed pullback → STRENGTHENING/HOLDING/WEAKENING. Alignment + cross-TF story. ConfidenceTracker EMA from internal coherence (ownership stability, chain agreement, alignment, vote dominance). The Trinity goes fully LIVE. |
 | **5 · Campaign positions** | ✅ shipped | `Position/PositionHealth · CampaignPositions · DecisionEngine · Execution+ · PaperTrade+` | Origin / Entry / Progress / Terminal roles. Hedge mode, pyramiding up to budget. Trinity-driven decisions: ENTER/HOLD/ADD/REDUCE/REVERSE/EXIT/TRANSFER as consequences. Tiered SL trailing (initial→breakeven→+1R→+2R). Per-tick MFE/MAE. Capital state machine still gates entries. **Engine now trades.** |
-| **6 · Self-observation** | planned | `Probability · SelfObservation · Capital throttle+` | Layer 12–14: probability clouds, confidence decay, regime detection |
-| **7 · Backtesting** | planned | `Replay · Shadow · Optimization · News+` | Replay walks, shadow comparison, parameter study, news feed |
+| **6 · Meta** | ✅ shipped | `Meta/Regime · Probability · SelfObservation · Meta` | Regime detection (TREND/EXPANSION/ROTATION/REVERSAL/RANGE). Probability cloud (continuation/terminal/transfer, sums to 100). SelfObservation rolling 200-sample buffer with HitRate / ContradictionRate / DecisionDiversity / SelfTrust composite. Meta orchestrator blends SelfTrust into Confidence so the engine adjusts its own self-trust. |
+| **7 · Backtest + News+** | ✅ shipped | `Backtest/Replay · Shadow · Optimization · News+` | Replay reads decision_log.csv to reconstruct stats. Shadow logger writes parallel decisions under a tag for "what-if" analysis. Optimization::OnTesterDefault returns a composite fitness (PF + Sharpe-like − drawdown + hit rate − contradiction). News calendar reader loads `MQL5/Files/F72_Omega/news/calendar.csv` (optional) and emits HIGH/MED/LOW/QUIET impact within ±15min windows. |
 
 Every later phase is **additive** — it sets `g_state.primed = true` once it has populated `OmegaSupporting` fields, and `OmegaState::DeriveTrinity()` folds them upward without any change to upstream modules.
 
@@ -91,6 +91,15 @@ MT5/F72_Omega/
 │     ├─ PositionHealth.mqh     — per-position state (ticket/role/dir/MFE/MAE/trailTier)
 │     ├─ DecisionEngine.mqh     — pure trinity → decision translator
 │     └─ CampaignPositions.mqh  — campaign manager (open/close/reduce/trail · hedge mode)
+│  └─ Meta/                     — meta layer (Phase 6)
+│     ├─ Regime.mqh             — regime detection (TREND / EXPANSION / ROTATION / REVERSAL / RANGE)
+│     ├─ Probability.mqh        — pCont / pTerminal / pTransfer cloud
+│     ├─ SelfObservation.mqh    — rolling 200-sample buffer · HitRate / SelfTrust
+│     └─ Meta.mqh               — orchestrator · blends SelfTrust into Confidence
+│  └─ Backtest/                 — backtest harness (Phase 7)
+│     ├─ Replay.mqh             — read decision_log.csv → ReplayStats
+│     ├─ Shadow.mqh             — parallel "what-if" logger
+│     └─ Optimization.mqh       — OnTester composite fitness function
 └─ README.md                    — this file
 └─ F72_Omega.mq5                — single-file bundle (regenerated from above)
 ```
