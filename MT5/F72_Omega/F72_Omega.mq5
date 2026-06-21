@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "1.0.0-phase5.6.1"
+#define OMEGA_VERSION                "1.0.0-v60port"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -5168,6 +5168,589 @@ public:
 
 #endif // __OMEGA_NARRATIVE_STORY_MQH__
 //==================================================================
+//= MODULE: V60/Letra  (Phase V60.1 — Letra wave + fractal stack)
+//= Source: ports the Pine F16 v60 'Letra engine + fractal stack'
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 had a multi-TF "Letra wave" with explicit waveDir,     |
+//|  stackDir, fractalStackDir, fractalStackScore. OMEGA's curve     |
+//|  engine already computes per-TF directions in OmegaCurve         |
+//|  (tfM1.dir / tfM5.dir / etc.), so this module derives the        |
+//|  Letra-equivalent outputs without re-implementing the physics.  |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_LETRA_MQH__
+#define __OMEGA_V60_LETRA_MQH__
+
+class OmegaLetra
+  {
+public:
+   int    waveDir;                // chart-TF wave direction (-1/0/+1)
+   int    stackDir;                // dominant direction across the stack
+   double stackPct;                // 0..100 stack agreement
+   int    fractalStackDir;
+   double fractalStackScore;
+   double waveProgress;            // 0..100 chart-TF maturity
+   int    alignedM1, alignedM5, alignedM15, alignedH1, alignedH4;
+
+                     OmegaLetra() { Reset(); }
+
+   void Reset()
+     {
+      waveDir = stackDir = fractalStackDir = 0;
+      stackPct = fractalStackScore = waveProgress = 0.0;
+      alignedM1 = alignedM5 = alignedM15 = alignedH1 = alignedH4 = 0;
+     }
+
+   void Update(OmegaCurve &curve)
+     {
+      CurveState *chart = curve.ChartTfState();
+      waveDir       = (chart != NULL) ? chart.dir : 0;
+      waveProgress  = (chart != NULL) ? chart.waveProgress : 0.0;
+
+      // stack direction from the 6-TF ladder (M1/M3/M5/M15/H1/H4).
+      // Each TF contributes +1/-1 by its own dir; stackDir is sign of sum.
+      int sum = curve.tfM1.dir + curve.tfM3.dir + curve.tfM5.dir +
+                 curve.tfM15.dir + curve.tfH1.dir + curve.tfH4.dir;
+      stackDir = sum > 0 ? 1 : sum < 0 ? -1 : 0;
+
+      // Stack agreement: count of TFs sharing stackDir / 6 → 0..100.
+      int sameDir = 0;
+      if(curve.tfM1.dir  == stackDir && stackDir != 0) sameDir++;
+      if(curve.tfM3.dir  == stackDir && stackDir != 0) sameDir++;
+      if(curve.tfM5.dir  == stackDir && stackDir != 0) sameDir++;
+      if(curve.tfM15.dir == stackDir && stackDir != 0) sameDir++;
+      if(curve.tfH1.dir  == stackDir && stackDir != 0) sameDir++;
+      if(curve.tfH4.dir  == stackDir && stackDir != 0) sameDir++;
+      stackPct = sameDir / 6.0 * 100.0;
+      fractalStackDir   = stackDir;
+      fractalStackScore = stackPct;
+
+      // Per-TF "aligned with stack" markers for Senseei consumption.
+      alignedM1  = (curve.tfM1.dir  == stackDir && stackDir != 0) ? 1 : 0;
+      alignedM5  = (curve.tfM5.dir  == stackDir && stackDir != 0) ? 1 : 0;
+      alignedM15 = (curve.tfM15.dir == stackDir && stackDir != 0) ? 1 : 0;
+      alignedH1  = (curve.tfH1.dir  == stackDir && stackDir != 0) ? 1 : 0;
+      alignedH4  = (curve.tfH4.dir  == stackDir && stackDir != 0) ? 1 : 0;
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("waveDir=%d stackDir=%d/%.0f%% prog=%.0f%%",
+                           waveDir, stackDir, stackPct, waveProgress);
+     }
+  };
+
+#endif // __OMEGA_V60_LETRA_MQH__
+
+//==================================================================
+//= MODULE: V60/Network  (Phase V60.2 — Network engine · MTF FU pools · netBias)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 PART A (Invisible Network Engine) ran f_fuPool across  |
+//|  MN/W/D/H4/H1/M15/M5 to detect FU spikes, then derived netBias   |
+//|  by walking the timeframe stack.                                 |
+//|                                                                  |
+//|  OMEGA already has FU detection in the per-TF curve states       |
+//|  (CurveState tracks ft/fb flip zones per TF). This module        |
+//|  derives netBias from the per-TF flip-zone presence + direction. |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_NETWORK_MQH__
+#define __OMEGA_V60_NETWORK_MQH__
+
+class OmegaNetwork
+  {
+public:
+   int    netBias;            // -1/0/+1
+   int    eligibleNodes;       // count of TFs with valid flip zones (proxy)
+   double pressure;             // -100..100 net authority
+   int    pdir;                 // sign(pressure) with deadband
+
+                     OmegaNetwork() { Reset(); }
+
+   void Reset()
+     {
+      netBias = pdir = 0;
+      eligibleNodes = 0;
+      pressure = 0.0;
+     }
+
+   void Update(OmegaCurve &curve)
+     {
+      // netBias picks the highest-TF node with confirmed direction,
+      // fallback to lower TFs. Mirrors Pine's f_fuPool walk.
+      int eligible = 0;
+      double bullW = 0, bearW = 0;
+      // Higher TF = higher weight (matches Pine "highest authority wins")
+      AddVote(curve.tfH4,  6.0, eligible, bullW, bearW);
+      AddVote(curve.tfH1,  5.0, eligible, bullW, bearW);
+      AddVote(curve.tfM15, 4.0, eligible, bullW, bearW);
+      AddVote(curve.tfM5,  3.0, eligible, bullW, bearW);
+      AddVote(curve.tfM3,  2.0, eligible, bullW, bearW);
+      AddVote(curve.tfM1,  1.0, eligible, bullW, bearW);
+      eligibleNodes = eligible;
+      double total = bullW + bearW;
+      pressure = total > 0 ? (bullW - bearW) / total * 100.0 : 0.0;
+      pdir = pressure > 12 ? 1 : pressure < -12 ? -1 : 0;
+      // netBias: prefer highest-TF active node's direction
+      if(curve.tfH4.dir  != 0) netBias = curve.tfH4.dir;
+      else if(curve.tfH1.dir  != 0) netBias = curve.tfH1.dir;
+      else if(curve.tfM15.dir != 0) netBias = curve.tfM15.dir;
+      else if(curve.tfM5.dir  != 0) netBias = curve.tfM5.dir;
+      else if(curve.tfM3.dir  != 0) netBias = curve.tfM3.dir;
+      else if(curve.tfM1.dir  != 0) netBias = curve.tfM1.dir;
+      else netBias = 0;
+     }
+
+private:
+   void AddVote(CurveState &tf, double weight, int &eligibleRef,
+                 double &bullW, double &bearW) const
+     {
+      if(tf.dir != 0)
+        {
+         eligibleRef++;
+         if(tf.dir == 1) bullW += weight;
+         else            bearW += weight;
+        }
+     }
+
+public:
+   string Snapshot() const
+     {
+      return StringFormat("netBias=%d pdir=%d pressure=%.0f eligN=%d",
+                           netBias, pdir, pressure, eligibleNodes);
+     }
+  };
+
+#endif // __OMEGA_V60_NETWORK_MQH__
+
+//==================================================================
+//= MODULE: V60/Energy  (Phase V60.3 — residual energy · attractor · resolution)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 had three sub-engines:                                 |
+//|    EDE — Energy Dissipation Engine                               |
+//|    RE  — Resolution Engine                                       |
+//|    EAE — Energy Attractor Engine                                 |
+//|                                                                  |
+//|  OMEGA's curve tree already tracks energy per node. This module  |
+//|  derives the V60-equivalent outputs from that.                   |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_ENERGY_MQH__
+#define __OMEGA_V60_ENERGY_MQH__
+
+class OmegaEnergy
+  {
+public:
+   double residualEnergyScore;      // 0..100
+   double primaryAttractorScore;     // 0..100
+   double primaryAttractorPrice;
+   string resolutionState;            // "RESOLVED" / "PARTIALLY RESOLVED" / "UNRESOLVED"
+   int    resCode;                    // 0=unresolved, 1=partial, 2=resolved
+   double dissipatedEnergy;           // 0..100 (decayed energy)
+   double expansionEnergy;             // 0..100 (energy still building)
+
+                     OmegaEnergy()
+     {
+      residualEnergyScore   = 0.0;
+      primaryAttractorScore = 0.0;
+      primaryAttractorPrice = 0.0;
+      resolutionState       = "UNRESOLVED";
+      resCode               = 0;
+      dissipatedEnergy      = 0.0;
+      expansionEnergy       = 0.0;
+     }
+
+   void Update(OmegaCurve &curve, double life)
+     {
+      int oi = curve.tree.ownerIndex;
+      // residual = energy remaining in the owner curve
+      residualEnergyScore = (oi >= 0 && curve.tree.tree[oi].alive)
+                              ? curve.tree.tree[oi].energy : 0.0;
+      // dissipated = energy lost vs peak
+      double peak = (oi >= 0) ? curve.tree.tree[oi].forcePeak : 0.0;
+      dissipatedEnergy = MathMax(0.0, peak - residualEnergyScore);
+      expansionEnergy  = MathMax(0.0, residualEnergyScore - 50.0);
+
+      // resolution: tied to life decay
+      if(life >= 60.0)        { resCode = 0; resolutionState = "UNRESOLVED"; }
+      else if(life >= 32.0)   { resCode = 1; resolutionState = "PARTIALLY RESOLVED"; }
+      else                     { resCode = 2; resolutionState = "RESOLVED"; }
+
+      // primary attractor: where the curve is heading (its extreme),
+      // weighted by residual energy + distance from current price.
+      primaryAttractorPrice = (oi >= 0) ? curve.tree.tree[oi].extreme : 0.0;
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      double atrApprox = 0.0;
+      // ATR proxy from chart-TF
+      CurveState *chart = curve.ChartTfState();
+      if(chart != NULL) atrApprox = chart.physics.atr;
+      if(atrApprox <= 0 && bid > 0) atrApprox = bid * 0.001;
+
+      double distAtr = (primaryAttractorPrice > 0 && bid > 0 && atrApprox > 0)
+                        ? MathAbs(bid - primaryAttractorPrice) / atrApprox : 100.0;
+      primaryAttractorScore = MathMax(0.0, MathMin(100.0,
+         residualEnergyScore * 0.40
+         + (resCode == 0 ? 30.0 : resCode == 1 ? 20.0 : 5.0)
+         + MathMax(0.0, 30.0 - distAtr * 5.0)));
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("res=%.0f attr=%.0f@%.5f resState=%s",
+                           residualEnergyScore, primaryAttractorScore,
+                           primaryAttractorPrice, resolutionState);
+     }
+  };
+
+#endif // __OMEGA_V60_ENERGY_MQH__
+
+//==================================================================
+//= MODULE: V60/Engine1A  (Phase V60.4 — phase-string state machine)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 Engine 1A determined the "current phase" string the    |
+//|  whole indicator displays (Point 4 Origin / Expansion / Pre-     |
+//|  Convexity / Induction / Liquidity / New High|Low / Climax /     |
+//|  Liquidation / Absorption / etc.).                               |
+//|                                                                  |
+//|  OMEGA's curve nodes already have an EmergentState() that emits  |
+//|  these names. This module just exposes the OWNER's state as the  |
+//|  canonical phase string for downstream consumers (Senseei /      |
+//|  Senzo / HUD).                                                   |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_ENGINE1A_MQH__
+#define __OMEGA_V60_ENGINE1A_MQH__
+
+class OmegaEngine1A
+  {
+public:
+   string currentPhase;
+   string subPhase;
+   string family;          // "Origin" / "Expansion" / "Retracement" / "Liquidation" / "Climax"
+
+                     OmegaEngine1A() { currentPhase = "—"; subPhase = ""; family = "Unknown"; }
+
+   void Update(OmegaCurve &curve)
+     {
+      int oi = curve.tree.ownerIndex;
+      currentPhase = (oi >= 0) ? curve.tree.tree[oi].state : "—";
+      // Family classification for high-level routing
+      if(StringFind(currentPhase, "Point 4") >= 0)            family = "Origin";
+      else if(StringFind(currentPhase, "Expansion") >= 0)      family = "Expansion";
+      else if(StringFind(currentPhase, "Retracement") >= 0)    family = "Retracement";
+      else if(StringFind(currentPhase, "Liquidation") >= 0)    family = "Liquidation";
+      else if(StringFind(currentPhase, "Liquidity") >= 0)      family = "Liquidation";
+      else if(StringFind(currentPhase, "Absorption") >= 0)     family = "Absorption";
+      else if(StringFind(currentPhase, "New High") >= 0 ||
+              StringFind(currentPhase, "New Low") >= 0)        family = "Climax";
+      else if(StringFind(currentPhase, "Climax") >= 0)         family = "Climax";
+      else if(StringFind(currentPhase, "Transition") >= 0)     family = "Transition";
+      else                                                      family = "Unknown";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("phase=\"%s\" family=%s", currentPhase, family);
+     }
+  };
+
+#endif // __OMEGA_V60_ENGINE1A_MQH__
+
+//==================================================================
+//= MODULE: V60/Liqg  (Phase V60.5 — liquidation framework)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 had liqg_active / liqg_target / liqg_subPhase to track |
+//|  pre-objective liquidation waves: where price is liquidating to, |
+//|  how close it is to the target, and the sub-phase narrative.    |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_LIQG_MQH__
+#define __OMEGA_V60_LIQG_MQH__
+
+class OmegaLiqg
+  {
+public:
+   bool   active;
+   double target;
+   string subPhase;       // "Forming" / "Approaching" / "Closing in" / "Arrived"
+   double distPct;         // distance to target as % of leg
+   double distAtr;         // distance in ATR units
+   bool   objArrival;      // arrived within 0.5 ATR
+
+                     OmegaLiqg() { Reset(); }
+
+   void Reset()
+     {
+      active = false;
+      target = 0.0;
+      subPhase = "";
+      distPct = 100.0;
+      distAtr = 100.0;
+      objArrival = false;
+     }
+
+   void Update(OmegaCurve &curve, OmegaEngine1A &engine1A)
+     {
+      // active when family is Liquidation
+      active = (engine1A.family == "Liquidation");
+      int oi = curve.tree.ownerIndex;
+      target = (oi >= 0) ? curve.tree.tree[oi].extreme : 0.0;
+      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+      CurveState *chart = curve.ChartTfState();
+      double atr = (chart != NULL) ? chart.physics.atr : 0.0;
+      if(atr <= 0) atr = MathMax(bid * 0.001, 1e-10);
+      distAtr = (active && target > 0 && bid > 0)
+                 ? MathAbs(bid - target) / atr : 100.0;
+      // distPct against the owner curve leg
+      double origin = (oi >= 0) ? curve.tree.tree[oi].origin : 0.0;
+      distPct = (active && target > 0 && origin > 0 && target != origin)
+                 ? MathAbs(bid - target) / MathAbs(target - origin) * 100.0
+                 : 100.0;
+      objArrival = active && distAtr < 0.5;
+      subPhase = !active ? "" :
+                  objArrival ? "Arrived" :
+                  distAtr < 1.5 ? "Closing in" :
+                  distAtr < 4.0 ? "Approaching" : "Forming";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("liqg=%s tgt=%.5f sub=%s dist=%.1f ATR",
+                           active ? "Y" : "N", target, subPhase, distAtr);
+     }
+  };
+
+#endif // __OMEGA_V60_LIQG_MQH__
+
+//==================================================================
+//= MODULE: V60/Senseei  (Phase V60.6 — meta-intelligence master vote)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 PART D — the senseei meta-intelligence. Combines:     |
+//|    waveDir + stackDir + netBias + pdir → master                 |
+//|    + alignment / conflict / threat / confidence                 |
+//|    + opportunity score / action / intent / timing               |
+//|                                                                  |
+//|  This is the layer that drives the indicator's verdict label.   |
+//|  In OMEGA it COEXISTS with the Phase 5.6 continuous decision    |
+//|  engine — Senseei is the Pine-style verdict for HUD/voice; the  |
+//|  Phase 5.6 DecisionEngine is what actually fires orders. Both   |
+//|  read the same underlying state.                                 |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_SENSEEI_MQH__
+#define __OMEGA_V60_SENSEEI_MQH__
+
+class OmegaSenseei
+  {
+public:
+   int    master;
+   double alignment;         // 0..100
+   double conflict;
+   double threat;
+   double confidence;
+   double oppScore;
+   string action;            // "WAIT" / "PREPARE" / "ATTACK" / "MANAGE / EXIT"
+   string opportunity;       // "NONE" / "DEVELOPING" / "GOOD" / "STRONG" / "EXCEPTIONAL"
+   string intent;
+   string timing;
+   double minConf;
+
+                     OmegaSenseei() { Reset(); minConf = 55.0; }
+
+   void Reset()
+     {
+      master = 0;
+      alignment = conflict = threat = confidence = oppScore = 0.0;
+      action = "WAIT"; opportunity = "NONE"; intent = "BALANCE"; timing = "EARLY";
+     }
+
+   void Init(double minConfidence) { minConf = minConfidence; }
+
+   void Update(const OmegaLetra &letra, const OmegaNetwork &network,
+                const OmegaEnergy &energy, const OmegaEngine1A &engine1A,
+                const OmegaLiqg &liqg, double timeAlign, double timeConflict)
+     {
+      // 4-vote master from waveDir + stackDir + netBias + pdir
+      int sum = letra.waveDir + letra.stackDir + network.netBias + network.pdir;
+      master = sum > 0 ? 1 : sum < 0 ? -1 : 0;
+
+      int cast = (letra.waveDir != 0 ? 1 : 0)
+               + (letra.stackDir != 0 ? 1 : 0)
+               + (network.netBias != 0 ? 1 : 0)
+               + (network.pdir != 0 ? 1 : 0);
+      int forV = (letra.waveDir == master && letra.waveDir != 0 ? 1 : 0)
+               + (letra.stackDir == master && letra.stackDir != 0 ? 1 : 0)
+               + (network.netBias == master && network.netBias != 0 ? 1 : 0)
+               + (network.pdir == master && network.pdir != 0 ? 1 : 0);
+      alignment = cast > 0 ? (double)forV / cast * 100.0 : 50.0;
+      conflict  = cast > 0 ? (double)(cast - forV) / cast * 100.0 : 0.0;
+
+      double residual = 100.0 - energy.residualEnergyScore;
+      threat = MathMax(0.0, MathMin(100.0,
+                conflict * 0.40 + residual * 0.28 + timeConflict * 0.12
+                + (network.pdir != 0 && network.pdir != master ? 18.0 : 0.0)
+                + (energy.resCode == 1 ? 10.0 : 0.0)));
+
+      confidence = MathMax(0.0, MathMin(100.0,
+                    alignment * 0.40 + timeAlign * 0.12 + letra.stackPct * 0.18
+                    + energy.primaryAttractorScore * 0.15
+                    + MathMin(15.0, network.eligibleNodes * 1.2)
+                    - threat * 0.20));
+
+      oppScore = MathMax(0.0, MathMin(100.0,
+                  alignment * 0.40 + energy.primaryAttractorScore * 0.30
+                  + letra.stackPct * 0.30 - threat * 0.35));
+
+      // intent
+      string ph = engine1A.currentPhase;
+      intent = conflict > 55                                   ? "ABSORPTION"
+              : liqg.active                                     ? "DELIVERY"
+              : (StringFind(ph, "Expansion") >= 0
+                  && StringFind(ph, "Pre-Convexity") < 0
+                  && StringFind(ph, "Induction") < 0
+                  && StringFind(ph, "Liquidity") < 0)            ? "EXPANSION"
+              : StringFind(ph, "Pre-Convexity") >= 0             ? "CONTINUATION"
+              : StringFind(ph, "Induction") >= 0                 ? "RESOLUTION"
+              : StringFind(ph, "Liquidity") >= 0                 ? "DELIVERY"
+              : (StringFind(ph, "New High") >= 0
+                  || StringFind(ph, "New Low") >= 0)             ? "DELIVERY"
+              : StringFind(ph, "Absorption") >= 0                ? "ABSORPTION"
+              : master == 0                                      ? "BALANCE" : "CONTINUATION";
+
+      // timing
+      double wp = letra.waveProgress;
+      timing = (StringFind(ph, "Absorption") >= 0 || energy.resCode == 2) ? "RESOLVED"
+              : wp < 15.0  ? "VERY EARLY"
+              : wp < 35.0  ? "EARLY"
+              : wp < 55.0  ? "DEVELOPING"
+              : wp < 80.0  ? "MID CYCLE"
+              : wp < 96.0  ? "LATE" : "TERMINAL";
+
+      // opportunity grade
+      opportunity = master == 0    ? "NONE"
+                  : conflict > 60  ? "DEVELOPING"
+                  : oppScore < 20  ? "NONE"
+                  : oppScore < 40  ? "DEVELOPING"
+                  : oppScore < 62  ? "GOOD"
+                  : oppScore < 82  ? "STRONG" : "EXCEPTIONAL";
+
+      // action verdict
+      bool strong = (opportunity == "STRONG" || opportunity == "EXCEPTIONAL");
+      bool good   = (opportunity == "GOOD" || opportunity == "STRONG");
+      action = master == 0          ? "WAIT"
+             : conflict > 60         ? "WAIT"
+             : energy.resCode == 2   ? "MANAGE / EXIT"
+             : (strong && confidence >= minConf && threat < 45) ? "ATTACK"
+             : good                  ? "PREPARE" : "WAIT";
+     }
+
+   string Snapshot() const
+     {
+      return StringFormat("master=%d %s · align=%.0f conf=%.0f thrt=%.0f opp=%.0f · %s · %s",
+                           master,
+                           master == 1 ? "▲" : master == -1 ? "▼" : "○",
+                           alignment, confidence, threat, oppScore,
+                           action, opportunity);
+     }
+  };
+
+#endif // __OMEGA_V60_SENSEEI_MQH__
+
+//==================================================================
+//= MODULE: V60/Senzo  (Phase V60.7 — trader-voice narration)
+//==================================================================
+//+------------------------------------------------------------------+
+//|  Pine V60 had a "Senzo" co-pilot that narrates the engine's      |
+//|  state in plain trader language. Multi-line output, 4-5 lines    |
+//|  of context-aware sentences.                                     |
+//+------------------------------------------------------------------+
+#ifndef __OMEGA_V60_SENZO_MQH__
+#define __OMEGA_V60_SENZO_MQH__
+
+class OmegaSenzo
+  {
+public:
+   string line1;        // Bias + regime
+   string line2;        // Curve-tree owner + life
+   string line3;        // Force / compression / lineage
+   string line4;        // Cross-TF (Letra/Network)
+   string line5;        // Verdict / action / size
+   string verdict;      // single-line summary
+
+                     OmegaSenzo() { Clear(); }
+
+   void Clear()
+     {
+      line1 = line2 = line3 = line4 = line5 = verdict = "";
+     }
+
+   void Update(const OmegaSenseei &sn, const OmegaState &state, OmegaCurve &curve,
+                const OmegaEngine1A &engine1A, const OmegaLiqg &liqg,
+                const OmegaLetra &letra, const OmegaNetwork &network,
+                const OmegaEnergy &energy, double life)
+     {
+      // Line 1 — bias + regime
+      string biasV = sn.master == 1 ? "Bias is up top" :
+                      sn.master == -1 ? "We're leaning short" :
+                      "Market can't pick a side";
+      string regimeV = sn.timing == "VERY EARLY" ? ", and we're very early in this one." :
+                        sn.timing == "EARLY" ? ", early stages of the move." :
+                        sn.timing == "DEVELOPING" ? ", developing momentum here." :
+                        sn.timing == "MID CYCLE" ? ", mid-cycle territory." :
+                        sn.timing == "LATE" ? ", getting late in the move." :
+                        sn.timing == "TERMINAL" ? ", terminal — don't chase." :
+                        ", energy resolved.";
+      line1 = biasV + regimeV;
+
+      // Line 2 — curve tree owner + life
+      int oi = curve.tree.ownerIndex;
+      string ownDirS = oi < 0 ? "no owning curve yet" :
+                        curve.tree.tree[oi].dir == 1 ? "the bullish curve owns this" :
+                        curve.tree.tree[oi].dir == -1 ? "the bearish curve owns this" :
+                        "ownership unresolved";
+      line2 = oi < 0
+              ? "The curve tree hasn't handed ownership to either side yet — I'm waiting for one curve to take the wheel."
+              : StringFormat("%s — reading %s, life around %d.",
+                              ownDirS,
+                              engine1A.currentPhase,
+                              (int)MathRound(life));
+
+      // Line 3 — force / compression / progression
+      string forceV = energy.resCode == 0 ? "Force is fresh — counter side suffocating, story's holding."
+                     : energy.resCode == 1 ? "Force is leaking, pullback is breathing — origin's back in play."
+                     : "Energy resolved, the move is done its job.";
+      line3 = forceV;
+
+      // Line 4 — cross-TF (Letra + Network)
+      string mtfV = sn.master == 0 ? "Across the timeframes there's no clear lead."
+                  : letra.stackPct >= 80 ? StringFormat("Across the stack, all timeframes aligned — %.0f%% agreement, strong continuation.", letra.stackPct)
+                  : letra.stackPct >= 60 ? StringFormat("Stack is leading the lower TFs (%.0f%% agreement).", letra.stackPct)
+                  : letra.stackPct <= 33 ? StringFormat("Lower TFs are countering the higher ones (%.0f%% agreement) — pullback or transition.", letra.stackPct)
+                  : StringFormat("Stack is mixed (%.0f%% agreement) — rotational.", letra.stackPct);
+      line4 = mtfV;
+
+      // Line 5 — verdict
+      string closeV = sn.action == "ATTACK"        ? "BOTTOM LINE: I'd take the shot."
+                    : sn.action == "PREPARE"       ? "BOTTOM LINE: get ready — not yet."
+                    : sn.action == "MANAGE / EXIT" ? "BOTTOM LINE: manage what you're holding."
+                    : "BOTTOM LINE: sit on your hands.";
+      line5 = StringFormat("Curve verdict: life %d · %s · %s · %s",
+                            (int)MathRound(life), sn.opportunity, sn.action, closeV);
+
+      verdict = StringFormat("%s · opp=%s · %s",
+                              sn.action, sn.opportunity, sn.intent);
+     }
+
+   string Snapshot() const
+     {
+      return verdict;
+     }
+  };
+
+#endif // __OMEGA_V60_SENZO_MQH__
+
+//==================================================================
 //= MODULE: Chart  (Phase 5.5 — On-chart diagnostics)
 //= Source: Include/Chart.mqh
 //==================================================================
@@ -8980,6 +9563,11 @@ input bool                InpSelfEvolutionEnabled= false;             // ENABLE 
 input double              InpEvolutionBaseline   = 0.55;              // Target win-rate (engine adapts vs this)
 input int                 InpEvolutionRebalanceN = 5;                 // Re-check every N closed campaigns
 
+input group "═══ V60 Perception Suite (Pine F16 v60 port) ═══"
+input double              InpSenseeiMinConf      = 55.0;              // Senseei: min confidence to escalate to ATTACK
+input bool                InpV60ShowVoice        = true;              // Show Senzo trader-voice on HUD
+input bool                InpV60UseInPanel       = true;              // Use V60 Senseei output in HUD verdict line
+
 //================== GLOBALS =========================================
 OmegaState        g_state;
 OmegaCapital      g_capital;
@@ -9008,6 +9596,14 @@ int      g_entrySuccesses    = 0;
 int      g_entrySkips        = 0;
 //-- Phases 5.2 / 9 / 10..14 — globals
 OmegaFunded         g_funded;       // Phase 5.2 — FTMO funded mode
+//-- Phases V60.1..V60.7 — Letra/Network/Energy/Engine1A/Liqg/Senseei/Senzo (Pine V60 port)
+OmegaLetra          g_letra;
+OmegaNetwork        g_network;
+OmegaEnergy         g_energy;
+OmegaEngine1A       g_engine1A;
+OmegaLiqg           g_liqg;
+OmegaSenseei        g_senseei;
+OmegaSenzo          g_senzo;
 CampaignArchive     g_archive;      // Phase 9   — campaign memory + similarity
 OmegaExplain        g_explain;      // Phase 14  — decision trace ring
 OmegaAttention      g_attention;    // Phase 10  — focus engine
@@ -9143,6 +9739,12 @@ int OnInit()
    //--- Phase 13 — Self-evolution.
    g_evolution.Init(InpSelfEvolutionEnabled, InpEvolutionBaseline, InpEvolutionRebalanceN);
 
+   //--- Phase V60 — Senseei minConfidence floor (matches Pine indicator's
+   //    minConf input; below this oppScore won't escalate to ATTACK).
+   g_senseei.Init(InpSenseeiMinConf);
+   OmegaLogger::LogInfo("V60", StringFormat(
+      "V60 perception suite initialised · senseei minConf=%.0f", InpSenseeiMinConf));
+
 //--- 10. News calendar (Phase 7, optional).
    g_news.Load();
 
@@ -9256,6 +9858,21 @@ void OnTick()
       //    confidence DIRECTLY into g_state. DeriveTrinity is now a clamp.
       bool storyAdvanced = g_story.Update(g_state, g_curve);
       g_state.DeriveTrinity();
+
+      //--- Phase V60 (Pine port): senseei perception suite. Runs every
+      //    tick after curve+story; outputs flow into HUD/log + Senzo voice.
+      g_letra.Update(g_curve);
+      g_network.Update(g_curve);
+      g_engine1A.Update(g_curve);
+      g_energy.Update(g_curve, g_state.life);
+      g_liqg.Update(g_curve, g_engine1A);
+      //   timeAlign / timeConflict — proxy from Phase 6 meta-regime.
+      double _timeAlign    = MathMax(0.0, MathMin(100.0, 50.0 + g_state.supporting.regime * 0.5));
+      double _timeConflict = MathMax(0.0, MathMin(100.0, 50.0 - g_state.supporting.regime * 0.5));
+      g_senseei.Update(g_letra, g_network, g_energy, g_engine1A, g_liqg,
+                        _timeAlign, _timeConflict);
+      g_senzo.Update(g_senseei, g_state, g_curve, g_engine1A, g_liqg,
+                      g_letra, g_network, g_energy, g_state.life);
 
       //--- Phase 6: meta layer overlays Self-Observation, Probability,
       //    Regime ON TOP of Story's trinity. Confidence gets blended
@@ -9389,6 +10006,19 @@ void OnTick()
         }
       else
          exLine = "Last: (no decisions yet)";
+      //   Phase V60: replace the explanation line with the Senseei verdict
+      //   when InpV60UseInPanel is on, so the user sees the Pine-style
+      //   master/opp/action triplet alongside the Phase 5.6 continuous flow.
+      if(InpV60UseInPanel)
+        {
+         exLine = StringFormat("V60 SENSEEI · %s %s · opp=%.0f conf=%.0f thrt=%.0f · %s · %s",
+                                g_senseei.master == 1 ? "▲ BULL" :
+                                g_senseei.master == -1 ? "▼ BEAR" : "○ —",
+                                g_senseei.action, g_senseei.oppScore,
+                                g_senseei.confidence, g_senseei.threat,
+                                g_senseei.opportunity, g_senseei.intent);
+         if(StringLen(exLine) > 130) exLine = StringSubstr(exLine, 0, 129);
+        }
       //   Phase 5.6: surface the actual entry-attempt outcome so the
       //   user can see whether the engine actually OPENED a position
       //   or which line skipped it. If status is fresh (<120 sec old)
@@ -9435,6 +10065,23 @@ void OnTimer()
          g_positions.Snapshot(),
          g_meta.Snapshot(),
          g_part.Snapshot()));
+
+      //--- Phase V60: surface the Pine-style Senseei verdict + Senzo voice
+      //    in the heartbeat so the trader sees the narrative state alongside
+      //    the standard heartbeat dump.
+      OmegaLogger::LogInfo("V60·SENSEEI",
+         StringFormat("%s · letra[%s] · network[%s] · energy[%s] · phase[%s] · liqg[%s]",
+                       g_senseei.Snapshot(), g_letra.Snapshot(),
+                       g_network.Snapshot(), g_energy.Snapshot(),
+                       g_engine1A.Snapshot(), g_liqg.Snapshot()));
+      if(InpV60ShowVoice)
+        {
+         OmegaLogger::LogInfo("V60·SENZO·1", g_senzo.line1);
+         OmegaLogger::LogInfo("V60·SENZO·2", g_senzo.line2);
+         OmegaLogger::LogInfo("V60·SENZO·3", g_senzo.line3);
+         OmegaLogger::LogInfo("V60·SENZO·4", g_senzo.line4);
+         OmegaLogger::LogInfo("V60·SENZO·5", g_senzo.line5);
+        }
 
       //--- Phase 2: emit a HEARTBEAT decision so the explainability path
       //    keeps logging trinity + curve snapshot every interval. Once
