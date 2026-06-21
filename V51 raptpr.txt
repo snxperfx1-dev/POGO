@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v54", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v55", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -1696,6 +1696,25 @@ f_wrap(string _s, int _w) =>
         _out := _out + (str.length(_out) == 0 ? "" : "\n") + _line
     _out
 
+// ── GLOBAL LABEL ANTI-COLLISION — one shared occupancy map for every on-chart
+//   price label (network levels · HUD locks · curve tree). f_slotX returns an X
+//   offset (in bars) that steps a label RIGHT into its own lane whenever its price
+//   sits within ~1 ATR of an already-placed label, so labels never stack on top of
+//   each other. gOccY is cleared once at the top of the islast drawing pass; each
+//   group draws in order (network → HUD → tree) so later groups avoid earlier ones.
+var array<float> gOccY = array.new<float>()
+f_slotX(float _y) =>
+    int _n = 0
+    float _gap = math.max(atr, 1e-10) * 0.95
+    if not na(_y) and array.size(gOccY) > 0
+        for _i = 0 to array.size(gOccY) - 1
+            float _v = array.get(gOccY, _i)
+            if not na(_v) and math.abs(_v - _y) < _gap
+                _n += 1
+    if not na(_y)
+        array.push(gOccY, _y)
+    _n * 13
+
 // ── Drawing objects + hoisted state for global alerts ────────────────────────
 var array<line>  net_lines = array.new<line>()
 var array<label> net_lbls  = array.new<label>()
@@ -1863,31 +1882,31 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
         int _xr = bar_index + 30
         if not na(_attP)
             array.push(hud_lines, line.new(bar_index - 3, _attP, _xr, _attP, color = color.new(#fbbf24, 15), width = 2))
-            array.push(hud_lbls, label.new(_xr, _attP, "⊙ TGT1 LOCK  " + str.tostring(math.round_to_mintick(_attP)), style = label.style_label_left, color = color.new(#fbbf24, 12), textcolor = #0d1117, size = size.small))
+            array.push(hud_lbls, label.new(_xr + f_slotX(_attP), _attP, "⊙ TGT1 LOCK  " + str.tostring(math.round_to_mintick(_attP)), style = label.style_label_left, color = color.new(#fbbf24, 12), textcolor = #0d1117, size = size.small))
         if not na(_attS)
             array.push(hud_lines, line.new(bar_index - 3, _attS, _xr, _attS, color = color.new(#38bdf8, 35), width = 1, style = line.style_dashed))
-            array.push(hud_lbls, label.new(_xr, _attS, "⊙ TGT2  " + str.tostring(math.round_to_mintick(_attS)), style = label.style_label_left, color = color.new(#38bdf8, 22), textcolor = #0d1117, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(_attS), _attS, "⊙ TGT2  " + str.tostring(math.round_to_mintick(_attS)), style = label.style_label_left, color = color.new(#38bdf8, 22), textcolor = #0d1117, size = size.tiny))
         if not na(_attE)
             array.push(hud_lines, line.new(bar_index - 3, _attE, _xr, _attE, color = color.new(#94a3b8, 50), width = 1, style = line.style_dotted))
-            array.push(hud_lbls, label.new(_xr, _attE, "⊙ TGT3  " + str.tostring(math.round_to_mintick(_attE)), style = label.style_label_left, color = color.new(#475569, 18), textcolor = #e2e8f0, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(_attE), _attE, "⊙ TGT3  " + str.tostring(math.round_to_mintick(_attE)), style = label.style_label_left, color = color.new(#475569, 18), textcolor = #e2e8f0, size = size.tiny))
         if not na(se5_sh)
             array.push(hud_lines, line.new(bar_index - 3, se5_sh, _xr, se5_sh, color = color.new(#cbd5e1, 35), width = 1, style = line.style_dashed))
-            array.push(hud_lbls, label.new(_xr, se5_sh, "M5 SWING HI  " + str.tostring(math.round_to_mintick(se5_sh)), style = label.style_label_left, color = color.new(#0b1220, 8), textcolor = #e2e8f0, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(se5_sh), se5_sh, "M5 SWING HI  " + str.tostring(math.round_to_mintick(se5_sh)), style = label.style_label_left, color = color.new(#0b1220, 8), textcolor = #e2e8f0, size = size.tiny))
         if not na(se5_sl)
             array.push(hud_lines, line.new(bar_index - 3, se5_sl, _xr, se5_sl, color = color.new(#cbd5e1, 35), width = 1, style = line.style_dashed))
-            array.push(hud_lbls, label.new(_xr, se5_sl, "M5 SWING LO  " + str.tostring(math.round_to_mintick(se5_sl)), style = label.style_label_left, color = color.new(#0b1220, 8), textcolor = #e2e8f0, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(se5_sl), se5_sl, "M5 SWING LO  " + str.tostring(math.round_to_mintick(se5_sl)), style = label.style_label_left, color = color.new(#0b1220, 8), textcolor = #e2e8f0, size = size.tiny))
         if not na(tH1H)
             array.push(hud_lines, line.new(bar_index - 3, tH1H, _xr, tH1H, color = color.new(#a78bfa, 45), width = 1, style = line.style_dotted))
-            array.push(hud_lbls, label.new(_xr, tH1H, "Hourly High  " + str.tostring(math.round_to_mintick(tH1H)), style = label.style_label_left, color = color.new(#1e1b4b, 8), textcolor = #c4b5fd, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(tH1H), tH1H, "Hourly High  " + str.tostring(math.round_to_mintick(tH1H)), style = label.style_label_left, color = color.new(#1e1b4b, 8), textcolor = #c4b5fd, size = size.tiny))
         if not na(tH1L)
             array.push(hud_lines, line.new(bar_index - 3, tH1L, _xr, tH1L, color = color.new(#a78bfa, 45), width = 1, style = line.style_dotted))
-            array.push(hud_lbls, label.new(_xr, tH1L, "Hourly Low  " + str.tostring(math.round_to_mintick(tH1L)), style = label.style_label_left, color = color.new(#1e1b4b, 8), textcolor = #c4b5fd, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(tH1L), tH1L, "Hourly Low  " + str.tostring(math.round_to_mintick(tH1L)), style = label.style_label_left, color = color.new(#1e1b4b, 8), textcolor = #c4b5fd, size = size.tiny))
         if not na(tDH)
             array.push(hud_lines, line.new(bar_index - 3, tDH, _xr, tDH, color = color.new(#38bdf8, 50), width = 1, style = line.style_dotted))
-            array.push(hud_lbls, label.new(_xr, tDH, "Daily High  " + str.tostring(math.round_to_mintick(tDH)), style = label.style_label_left, color = color.new(#082f49, 6), textcolor = #7dd3fc, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(tDH), tDH, "Daily High  " + str.tostring(math.round_to_mintick(tDH)), style = label.style_label_left, color = color.new(#082f49, 6), textcolor = #7dd3fc, size = size.tiny))
         if not na(tDL)
             array.push(hud_lines, line.new(bar_index - 3, tDL, _xr, tDL, color = color.new(#38bdf8, 50), width = 1, style = line.style_dotted))
-            array.push(hud_lbls, label.new(_xr, tDL, "Daily Low  " + str.tostring(math.round_to_mintick(tDL)), style = label.style_label_left, color = color.new(#082f49, 6), textcolor = #7dd3fc, size = size.tiny))
+            array.push(hud_lbls, label.new(_xr + f_slotX(tDL), tDL, "Daily Low  " + str.tostring(math.round_to_mintick(tDL)), style = label.style_label_left, color = color.new(#082f49, 6), textcolor = #7dd3fc, size = size.tiny))
         color _fpCol = master == 1 ? #34d399 : master == -1 ? #fb7185 : #38bdf8
         int   _x1 = bar_index + 8
         int   _x2 = bar_index + 18
@@ -2066,6 +2085,7 @@ f_drawTf() =>
     table.cell(tfPanel, 0, 8, (fractalStackScore >= 66 ? "DOMINANT" : "CONTESTED") + " · " + (fractalStackDir == 1 ? "TRANSFER UPWARD" : fractalStackDir == -1 ? "TRANSFER DOWNWARD" : "BALANCED"), text_color = #cfe9ff, text_size = size.small, text_halign = text.align_left)
 
 if barstate.islast
+    array.clear(gOccY)
     if array.size(net_lines) > 0
         for _i = 0 to array.size(net_lines) - 1
             line.delete(array.get(net_lines, _i))
@@ -2134,7 +2154,7 @@ if barstate.islast
                 if showNet
                     color _bc = f_tfColor(_wt)
                     array.push(net_lines, line.new(bar_index - 1, _np, bar_index + 10, _np, color = color.new(_bc, _st == 0 ? 25 : 70), width = 1, style = _st == 0 ? line.style_solid : line.style_dotted))
-                    array.push(net_lbls, label.new(bar_index + 10, _np, f_wtTf(_wt) + (_nd == 1 ? " ▲ " : " ▼ ") + str.tostring(math.round(_a)), style = label.style_label_left, color = color.new(#10103a, 25), textcolor = _st == 0 ? _bc : #475569, size = size.tiny))
+                    array.push(net_lbls, label.new(bar_index + 10 + f_slotX(_np), _np, f_wtTf(_wt) + (_nd == 1 ? " ▲ " : " ▼ ") + str.tostring(math.round(_a)), style = label.style_label_left, color = color.new(#10103a, 25), textcolor = _st == 0 ? _bc : #475569, size = size.tiny))
 
     // ── FEZ corridor ─────────────────────────────────────────────────────────
     if showFEZ and not na(_fezHi) and not na(_fezLo)
@@ -2250,7 +2270,7 @@ if barstate.islast
     if showVerdict
         if not na(vLbl)
             label.delete(vLbl)
-        vLbl := label.new(bar_index + 5, high + atr * 2.5, "SENSEEI " + action + " · " + str.tostring(math.round(confidence)) + "%", style = label.style_label_down, color = color.new(aCol, 18), textcolor = #e2e8f0, size = size.small)
+        vLbl := label.new(bar_index + 5 + f_slotX(high + atr * 2.5), high + atr * 2.5, "SENSEEI " + action + " · " + str.tostring(math.round(confidence)) + "%", style = label.style_label_down, color = color.new(aCol, 18), textcolor = #e2e8f0, size = size.small)
 
     // ══════════════════════════════════════════════════════════════════════════
     // PART E — PANELS
@@ -2329,16 +2349,16 @@ f_drawCampaign() =>
         int _px2 = bar_index + 12
         if not na(_f618)
             array.push(part_lines, line.new(bar_index - 2, _f618, _px2, _f618, color = color.new(#38bdf8, 35), width = 1, style = line.style_dotted))
-            array.push(part_lbls,  label.new(_px2, _f618, "0.618 · participants", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #7dd3fc, size = size.tiny))
+            array.push(part_lbls,  label.new(_px2 + f_slotX(_f618), _f618, "0.618 · participants", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #7dd3fc, size = size.tiny))
         if not na(_f70)
             array.push(part_lines, line.new(bar_index - 2, _f70, _px2, _f70, color = color.new(#fbbf24, 40), width = 1, style = line.style_dotted))
-            array.push(part_lbls,  label.new(_px2, _f70, "0.70 · interference", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #fcd34d, size = size.tiny))
+            array.push(part_lbls,  label.new(_px2 + f_slotX(_f70), _f70, "0.70 · interference", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #fcd34d, size = size.tiny))
         if not na(_f786)
             array.push(part_lines, line.new(bar_index - 2, _f786, _px2, _f786, color = color.new(#fb923c, 40), width = 1, style = line.style_dotted))
-            array.push(part_lbls,  label.new(_px2, _f786, "0.786 · heavy", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #fdba74, size = size.tiny))
+            array.push(part_lbls,  label.new(_px2 + f_slotX(_f786), _f786, "0.786 · heavy", style = label.style_label_left, color = color.new(#0b1220, 25), textcolor = #fdba74, size = size.tiny))
         if not na(_flipLvl)
             array.push(part_lines, line.new(bar_index - 2, _flipLvl, _px2, _flipLvl, color = color.new(#f43f5e, 18), width = 2))
-            array.push(part_lbls,  label.new(_px2, _flipLvl, "FLIP · TRUE INDUCTION", style = label.style_label_left, color = color.new(#f43f5e, 12), textcolor = #0d1117, size = size.tiny))
+            array.push(part_lbls,  label.new(_px2 + f_slotX(_flipLvl), _flipLvl, "FLIP · TRUE INDUCTION", style = label.style_label_left, color = color.new(#f43f5e, 12), textcolor = #0d1117, size = size.tiny))
     if showCampaign
         if na(campaign)
             campaign := table.new(position.middle_left, 2, 10, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
@@ -2532,17 +2552,7 @@ if barstate.islast and showCurve
 //    emergent phase + the actual price. This is "where it's happening". ─────────
 // f_lane — anti-collision: returns how many already-placed labels share this price
 // level (within _gap), so a label can step RIGHT by that count and never obscure another.
-f_lane(array<float> _occ, float _y, float _gap) =>
-    int _n = 0
-    if not na(_y) and array.size(_occ) > 0
-        for _i = 0 to array.size(_occ) - 1
-            float _v = array.get(_occ, _i)
-            if not na(_v) and math.abs(_v - _y) < _gap
-                _n += 1
-    if not na(_y)
-        array.push(_occ, _y)
-    _n
-
+// anti-collision is now handled globally by f_slotX (shared gOccY) — defined above
 if barstate.islast and showTree
     if array.size(tree_lines) > 0
         for _i = 0 to array.size(tree_lines) - 1
@@ -2556,19 +2566,8 @@ if barstate.islast and showTree
         for _i = 0 to array.size(tree_boxes) - 1
             box.delete(array.get(tree_boxes, _i))
         array.clear(tree_boxes)
-    // anti-collision: seed with the on-chart engine label levels, then place each curve
-    // label in a lane that steps RIGHT whenever it shares a price with another, so logos
-    // never obscure one another (even when price levels coincide).
-    float _gap = math.max(atr, 1e-10) * 1.2
-    array<float> _occY = array.new<float>()
-    array.push(_occY, se5_sh)
-    array.push(_occY, se5_sl)
-    array.push(_occY, flipTop)
-    array.push(_occY, flipBot)
-    array.push(_occY, eae_primaryAttractorPrice)
-    array.push(_occY, tH1H)
-    array.push(_occY, tH1L)
-    array.push(_occY, se5_tgt)
+    // each curve label steps RIGHT (shared f_slotX) so it never overlaps the
+    // network/HUD labels already placed, or other curve labels.
     if array.size(_tree) > 0
         for _ti = 0 to array.size(_tree) - 1
             CurveNode _tn = array.get(_tree, _ti)
@@ -2581,26 +2580,21 @@ if barstate.islast and showTree
                 array.push(tree_boxes, box.new(_x0, _hi, _xr, _lo, border_color = color.new(#ff1f1f, 0), border_width = 3, bgcolor = color.new(#ff1f1f, 100)))
                 string _idTag = "C0 " + (_tn.dir == 1 ? "▲ " : "▼ ") + _tn.state + " · origin " + str.tostring(math.round_to_mintick(_tn.origin))
                 if not (_cpState == "LEAKING" and not _progressing)
-                    int _lnO = f_lane(_occY, _tn.origin, _gap)
-                    array.push(tree_lbls, label.new(bar_index + 4 + _lnO * 9, _tn.origin, _idTag, style = label.style_label_left, color = color.new(#0a0e27, 25), textcolor = #ff3b3b, size = size.normal))
-                int _lnX = f_lane(_occY, _tn.extreme, _gap)
-                array.push(tree_lbls, label.new(bar_index + 4 + _lnX * 9, _tn.extreme, "C0 extreme " + str.tostring(math.round_to_mintick(_tn.extreme)) + " · e" + str.tostring(math.round(_tn.energy)), style = label.style_label_left, color = color.new(#0a0e27, 25), textcolor = #ff3b3b, size = size.normal))
+                    array.push(tree_lbls, label.new(bar_index + 4 + f_slotX(_tn.origin), _tn.origin, _idTag, style = label.style_label_left, color = color.new(#0a0e27, 25), textcolor = #ff3b3b, size = size.normal))
+                array.push(tree_lbls, label.new(bar_index + 4 + f_slotX(_tn.extreme), _tn.extreme, "C0 extreme " + str.tostring(math.round_to_mintick(_tn.extreme)) + " · e" + str.tostring(math.round(_tn.energy)), style = label.style_label_left, color = color.new(#0a0e27, 25), textcolor = #ff3b3b, size = size.normal))
     // ── Principle 10 — WHERE ownership defends: migrated 0.5–0.618 band (force persists)
     //    or the origin (force leaking). Laned so it never overlaps other logos. ──
     if not na(_ownExt) and not na(_ownOrig)
         int _mx0 = bar_index - 60
         if _cpState == "LEAKING" and not _progressing
-            int _lnL = f_lane(_occY, _ownOrig, _gap)
             array.push(tree_lines, line.new(_mx0, _ownOrig, bar_index + 4, _ownOrig, color = color.new(#fb7185, 25), width = 2))
-            array.push(tree_lbls, label.new(bar_index + 22 + _lnL * 9, _ownOrig, "ORIGIN IN PLAY · force leaking " + str.tostring(math.round_to_mintick(_ownOrig)), style = label.style_label_left, color = color.new(#fb7185, 20), textcolor = #160406, size = size.small))
+            array.push(tree_lbls, label.new(bar_index + 22 + f_slotX(_ownOrig), _ownOrig, "ORIGIN IN PLAY · force leaking " + str.tostring(math.round_to_mintick(_ownOrig)), style = label.style_label_left, color = color.new(#fb7185, 20), textcolor = #160406, size = size.small))
         else if not na(_mig50) and not na(_mig618)
             color _mc = _cpState == "PERSISTING" ? #5eead4 : #fbbf24
-            int _lnMg = f_lane(_occY, _mig618, _gap)
             array.push(tree_boxes, box.new(_mx0, _mig50, bar_index + 4, _mig618, border_color = color.new(_mc, 40), border_width = 1, bgcolor = color.new(_mc, 82)))
-            array.push(tree_lbls, label.new(bar_index + 22 + _lnMg * 9, _mig618, (_cpState == "PERSISTING" ? "OWNERSHIP MIGRATED · defends 0.5–0.618" : "watch 0.5–0.618") + " · F" + str.tostring(math.round(_cpForce)) + " " + _cpTrend, style = label.style_label_left, color = color.new(_mc, 22), textcolor = #04130c, size = size.small))
+            array.push(tree_lbls, label.new(bar_index + 22 + f_slotX(_mig618), _mig618, (_cpState == "PERSISTING" ? "OWNERSHIP MIGRATED · defends 0.5–0.618" : "watch 0.5–0.618") + " · F" + str.tostring(math.round(_cpForce)) + " " + _cpTrend, style = label.style_label_left, color = color.new(_mc, 22), textcolor = #04130c, size = size.small))
     // the hold-vs-flip verdict — far-right, also laned
-    int _lnV = f_lane(_occY, close, _gap)
-    array.push(tree_lbls, label.new(bar_index + 42 + _lnV * 9, close, _aliveTx + "  (life " + str.tostring(math.round(_life)) + ")", style = label.style_label_left, color = color.new(_aliveCol, 18), textcolor = #0a0e27, size = size.small))
+    array.push(tree_lbls, label.new(bar_index + 42 + f_slotX(close), close, _aliveTx + "  (life " + str.tostring(math.round(_life)) + ")", style = label.style_label_left, color = color.new(_aliveCol, 18), textcolor = #0a0e27, size = size.small))
 
 // ── Alerts (global scope) ─────────────────────────────────────────────────────
 alertcondition(gAction == "ATTACK" and gMaster == 1,  "Senseei ATTACK Long",  "Master Senseei: ATTACK long")
