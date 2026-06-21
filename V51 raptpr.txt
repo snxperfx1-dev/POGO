@@ -11,7 +11,7 @@
 // For the FULL multi-timeframe network, run it on M1–M15 (Pine builds the network
 // from the chart timeframe upward).
 // ═══════════════════════════════════════════════════════════════════════════════
-indicator("F16 Raptor v60", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+indicator("F16 Raptor v61", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 string GRP = "Master Senseei"
@@ -38,6 +38,7 @@ bool   showCurve   = input.bool(true, "Show Curve object — energy state (F72 f
 bool   showTree    = input.bool(true, "Plot CURVE TREE on chart (live curves · origin→extreme · emergent phase)", group = GRP)
 string curveCtx    = input.string("Chart wave", "Curve TREE root anchor", options = ["Chart wave", "Higher TF", "Highest TF"], tooltip = "Which curve the tree tracks. 'Chart wave' = the chart timeframe's own curve (recommended — the MTF map already shows higher-timeframe context). 'Higher/Highest TF' climb the timeframe ladder. The panel header shows the actual resolved timeframe.", group = GRP)
 bool   phaseFromNode = input.bool(false, "Phase label driven by curve NODE (emergent) — off = legacy machine", group = GRP, tooltip = "OFF (default): the on-chart phase regions + readout follow the legacy Engine-1A machine phase (the original, more accurate labels). ON: they follow the curve tree's emergent node.state (1-bar settle, debounced) — experimental.")
+bool   showFlipFU  = input.bool(true, "Mark FU candles + Flip Zone on chart", group = GRP, tooltip = "Draw FU spike markers (rejection wicks at local extremes) on each chart bar, and the chart wave's flip-zone (order block) as a coloured right-extended box.")
 int    minConf     = input.int  (55,  "Min confidence to ATTACK",     group = GRP, minval = 0, maxval = 100)
 int    pivLen      = input.int  (8,   "Wave pivot length",            group = GRP, minval = 2, maxval = 50)
 bool   showRegions = input.bool (true, "Show phase REGION labels",    group = GRP)
@@ -153,6 +154,22 @@ f_fuPool(simple float _wf, simple int _lb) =>
 [h1Tip, h1Mid, h1Dir, h1V, h1Sc]  = request.security(syminfo.tickerid, f_safeTF("60"),  f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
 [m15Tip,m15Mid,m15Dir,m15V,m15Sc] = request.security(syminfo.tickerid, f_safeTF("15"),  f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
 [m5Tip, m5Mid, m5Dir, m5V, m5Sc]  = request.security(syminfo.tickerid, f_safeTF("5"),   f_fuPool(wickFrac, lookback), lookahead = barmerge.lookahead_off)
+
+// ── ON-CHART FU SPIKE MARKS — same trigger as the node engine's f_fuPool: a
+//    dominant rejection wick at a local extreme (swept or not), on the chart TF.
+//    Marked with a triangle + "FU" and the candle tinted so they're easy to spot.
+float _cfuRng = math.max(high - low, 1e-10)
+float _cfuUW  = (high - math.max(open, close)) / _cfuRng
+float _cfuLW  = (math.min(open, close) - low)  / _cfuRng
+float _cfuPHi = ta.highest(high, lookback)[1]
+float _cfuPLo = ta.lowest(low,  lookback)[1]
+bool  _cfuTop = high >= ta.highest(high, lookback)
+bool  _cfuBot = low  <= ta.lowest(low,  lookback)
+bool  cfuBear = _cfuUW >= wickFrac and ((not na(_cfuPHi) and high >= _cfuPHi and close < _cfuPHi) or (_cfuTop and close < open))
+bool  cfuBull = _cfuLW >= wickFrac and ((not na(_cfuPLo) and low  <= _cfuPLo and close > _cfuPLo) or (_cfuBot and close > open))
+plotshape(showFlipFU and cfuBull, "Bullish FU", style = shape.triangleup,   location = location.belowbar, color = #22d3ee, textcolor = #22d3ee, size = size.tiny, text = "FU")
+plotshape(showFlipFU and cfuBear, "Bearish FU", style = shape.triangledown, location = location.abovebar, color = #f59e0b, textcolor = #f59e0b, size = size.tiny, text = "FU")
+barcolor(showFlipFU ? (cfuBull ? color.new(#22d3ee, 0) : cfuBear ? color.new(#f59e0b, 0) : na) : na)
 
 float _ema50 = ta.ema(close, 50)
 int   netBias = nz(mnV) == 1 ? nz(mnDir) : nz(wV) == 1 ? nz(wDir) : nz(dV) == 1 ? nz(dDir) : nz(h4V) == 1 ? nz(h4Dir) : nz(h1V) == 1 ? nz(h1Dir) : nz(m15V) == 1 ? nz(m15Dir) : nz(m5V) == 1 ? nz(m5Dir) : (close > _ema50 ? 1 : close < _ema50 ? -1 : 0)
@@ -1721,7 +1738,7 @@ var string gAction   = "WAIT"
 f_drawReadout(int resCode, float residual, float attractor, int attrIdx, int pdir, int eligN, float pressure) =>
     var table readout = na
     if na(readout)
-        readout := table.new(position.top_right, 2, 12, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
+        readout := table.new(position.middle_right, 2, 12, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
     table.cell(readout, 0, 0, "◤ ENGINE READOUT ▌", text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 20))
     table.cell(readout, 1, 0, _liveDot, text_color = _pulse ? #34d399 : #475569, text_size = size.normal, bgcolor = color.new(#0c4a6e, 20))
     table.cell(readout, 0, 1, "Letra · Wave", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
@@ -1750,7 +1767,7 @@ f_drawReadout(int resCode, float residual, float attractor, int attrIdx, int pdi
 f_drawStrat(int master, color vCol, color aCol, string action, string intent, float alignment, float conflict, float confidence, float threat, string opportunity, string timing, int resCode, int nextIdx) =>
     var table strat = na
     if na(strat)
-        strat := table.new(position.top_left, 2, 10, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
+        strat := table.new(position.middle_left, 2, 10, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 25), frame_width = 2, border_width = 0)
     table.cell(strat, 0, 0, "◤ SENSEEI ▌ HUD " + _liveDot, text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#4338ca, 30))
     table.cell(strat, 1, 0, master == 1 ? "▲ BULL" : master == -1 ? "▼ BEAR" : "○ —", text_color = #e2e8f0, text_size = size.normal, bgcolor = color.new(vCol, 50))
     table.cell(strat, 0, 1, "Phase", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
@@ -1832,12 +1849,19 @@ f_drawCopilot(int master, string action, float oppScore, float alignment, float 
     string _vRetr  = na(_retrX) ? "" : _retrX < 30.0 ? " We're parked near the extreme — shallow and healthy." : _retrX > 70.0 ? " We've pulled deep toward the origin — that's the danger zone." : ""
     string _vPar   = _htfThreat == "—" ? "" : _htfThreat == "AT ZONE" ? "We're right at the " + _wl6 + " parent zone — that's where this gets decided, stay sharp." : _htfThreat == "APPROACHING" ? "We're closing in on the " + _wl6 + " parent level — watch how it reacts there." : "The " + _wl6 + " parent's still got clear runway, so there's room to run."
     string _vAlive = "Curve verdict: " + _aliveTx
-    int    WW = 40
+    // ── ONE-LINE SYNTHESIS — fold the curve tree state, the MTF stack, force and
+    //    life into a single trader-voice "story" so Senzo doesn't just list facts
+    //    but tells you what's actually happening across the whole picture. ───────
+    string _vCurveLine = _ownDirT == 0 ? "no curve has the wheel" : ((_ownDirT == 1 ? "the bull curve" : "the bear curve") + " owns this in " + _ownState)
+    string _vStackLine = mtfAlignN >= 4 ? "stack's lined up behind it " + str.tostring(mtfAlignN) + "/6" : mtfAlignN <= 2 ? "stack's against it " + str.tostring(mtfAlignN) + "/6" : "stack's split " + str.tostring(mtfAlignN) + "/6"
+    string _vForceLine = _cpState == "PERSISTING" ? "force still persisting" : _cpState == "LEAKING" ? "force leaking, ownership ripe to flip" : "force neutral"
+    string _vSynth     = "STORY: " + _vCurveLine + ", " + _vStackLine + ", " + _vForceLine + ", life " + str.tostring(math.round(_life)) + " — " + (action == "ATTACK" ? "the picture lines up, I'd take the shot." : action == "PREPARE" ? "pieces are aligning, not quite there." : str.startswith(action, "MANAGE") ? "manage what you've got, don't add until it clears." : "nothing here worth risk, sit on your hands.")
+    int    WW = 28
     string _szStory1 = _vBias + _vReg + " " + _vEng
     string _szStory2 = _vTree + _vRetr + " " + _vForce + " " + _vLin + _vChain
     string _szStory3 = _vMTF + (_vPar == "" ? "" : " " + _vPar) + " " + _vTime
     string _szStory4 = _vTgt + " " + _vRisk + " " + _vAlive
-    string senzoVoice = f_wrap(_szStory1, WW) + "\n" + f_wrap(_szStory2, WW) + "\n" + f_wrap(_szStory3, WW) + "\n" + f_wrap(_szStory4, WW)
+    string senzoVoice = f_wrap(_vSynth, WW) + "\n" + f_wrap(_szStory1, WW) + "\n" + f_wrap(_szStory2, WW) + "\n" + f_wrap(_szStory3, WW) + "\n" + f_wrap(_szStory4, WW)
     string _armed = action == "ATTACK" ? "● ARMED" : action == "PREPARE" ? "◐ STANDBY" : str.startswith(action, "MANAGE") ? "◧ MANAGE" : "○ SAFE"
     color  _armCol = action == "ATTACK" ? #34d399 : action == "PREPARE" ? #fbbf24 : str.startswith(action, "MANAGE") ? #38bdf8 : #475569
     string _blk = ""
@@ -2389,12 +2413,14 @@ f_tfExt(int _d, float _sh, float _sl) => _d == 1 ? _sh : _d == -1 ? _sl : na
 f_tfCoord(float _o, float _x) => (na(_o) ? "—" : str.tostring(math.round_to_mintick(_o))) + "→" + (na(_x) ? "—" : str.tostring(math.round_to_mintick(_x))) + "→" + str.tostring(math.round_to_mintick(close))
 f_tfRel(int _d, int _pd) => (_d == 0 or _pd == 0) ? "—" : _d == _pd ? "↑ align" : "✗ counter"
 f_dirArrow(int _d) => _d == 1 ? "▲" : _d == -1 ? "▼" : "—"
-// ── TOP PANEL — MTF CURVE MAP (cols 0–3) and CURVE TREE (cols 4–5) share ONE
-//    table (global topT) so they render side by side at the top with no overlap.
-var table topT = na
+// ── TOP PANELS — MTF CURVE MAP (own table @ top_left) and CURVE TREE (own table
+//    @ top_right) — split so each is clearly anchored to a top corner with no
+//    overlap and no shared-column rendering. ──────────────────────────────────
+var table mtfT  = na
+var table treeT = na
 if barstate.islast and showCurve
-    if na(topT)
-        topT := table.new(position.top_center, 6, 16, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
+    if na(mtfT)
+        mtfT := table.new(position.top_left, 4, 9, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
     // ── OWNERSHIP MERGE (Principle 9) — does the child curve respect the parent FU
     //    and collapse back into it (Camp B → Camp A, parent campaign NOT finished),
     //    or did it break the parent (genuine handoff → new campaign)? ─────────────
@@ -2410,46 +2436,48 @@ if barstate.islast and showCurve
     bool   _transferred = _counterChild and _brokePar
     string _ownStateTx  = _transferred ? "TRANSFERRED · new campaign" : _merged ? "MERGED → parent (B→A)" : _counterChild ? "child recursion active" : "aligned with parent"
     color  _ownStateCol = _transferred ? #fb7185 : _merged ? #34d399 : _counterChild ? #fbbf24 : #38bdf8
-    table.cell(topT, 0, 0, "◤ MTF CURVE MAP " + _liveDot, text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 1, 0, "dir · phase", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 2, 0, "origin → extreme → now", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 3, 0, "vs HTF", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 0, 1, _wl6 + " (parent)", text_color = l4_dir == 1 ? #34d399 : l4_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 1, f_dirArrow(l4_dir) + " " + f_famS(int(nz(se240_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 1, f_tfCoord(se240_inv, _ext240), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 1, "—", text_color = #475569, text_size = size.small)
-    table.cell(topT, 0, 2, _wl5, text_color = l2_dir == 1 ? #34d399 : l2_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 2, f_dirArrow(l2_dir) + " " + f_famS(int(nz(se60_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 2, f_tfCoord(se60_inv, _ext60), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 2, f_tfRel(l2_dir, l4_dir), text_color = l2_dir == l4_dir ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(topT, 0, 3, _wl4, text_color = l1_dir == 1 ? #34d399 : l1_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 3, f_dirArrow(l1_dir) + " " + f_famS(int(nz(se15_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 3, f_tfCoord(se15_inv, _ext15), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 3, f_tfRel(l1_dir, l2_dir), text_color = l1_dir == l2_dir ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(topT, 0, 4, _wl3 + " (chart)", text_color = l0_dir == 1 ? #34d399 : l0_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 4, f_dirArrow(l0_dir) + " " + f_famS(int(nz(se5_ph))), text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 4, f_tfCoord(se5_inv, _ext5), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 4, f_tfRel(l0_dir, l1_dir), text_color = l0_dir == l1_dir ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(topT, 0, 5, _wl2, text_color = l3_dir == 1 ? #34d399 : l3_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 5, f_dirArrow(l3_dir) + " " + f_famS(int(nz(se3_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 5, f_tfCoord(se3_inv, _ext3), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 5, f_tfRel(l3_dir, l0_dir), text_color = l3_dir == l0_dir ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(topT, 0, 6, _wl1 + " (child)", text_color = m1_dir == 1 ? #34d399 : m1_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 6, f_dirArrow(m1_dir) + " " + f_famS(int(nz(se1_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 6, f_tfCoord(se1_inv, _ext1), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 3, 6, f_tfRel(m1_dir, l3_dir), text_color = m1_dir == l3_dir ? #34d399 : #fb7185, text_size = size.small)
-    table.cell(topT, 0, 7, "Cross-TF story", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 7, mtfStory, text_color = mtfAlignN >= 4 ? #34d399 : mtfAlignN <= 2 ? #fb7185 : #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 7, "aligned " + str.tostring(mtfAlignN) + "/6", text_color = #e2e8f0, text_size = size.small)
-    table.cell(topT, 0, 8, "Ownership", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 1, 8, _ownStateTx, text_color = _ownStateCol, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 2, 8, "owns: " + mtfOwnerL, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 0, 0, "◤ MTF CURVE MAP " + _liveDot, text_color = #d7faff, text_size = size.small, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(mtfT, 1, 0, "dir · phase", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(mtfT, 2, 0, "origin → extreme → now", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(mtfT, 3, 0, "vs HTF", text_color = #94a3b8, text_size = size.small, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(mtfT, 0, 1, _wl6 + " (parent)", text_color = l4_dir == 1 ? #34d399 : l4_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 1, f_dirArrow(l4_dir) + " " + f_famS(int(nz(se240_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 1, f_tfCoord(se240_inv, _ext240), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 1, "—", text_color = #475569, text_size = size.small)
+    table.cell(mtfT, 0, 2, _wl5, text_color = l2_dir == 1 ? #34d399 : l2_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 2, f_dirArrow(l2_dir) + " " + f_famS(int(nz(se60_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 2, f_tfCoord(se60_inv, _ext60), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 2, f_tfRel(l2_dir, l4_dir), text_color = l2_dir == l4_dir ? #34d399 : #fb7185, text_size = size.small)
+    table.cell(mtfT, 0, 3, _wl4, text_color = l1_dir == 1 ? #34d399 : l1_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 3, f_dirArrow(l1_dir) + " " + f_famS(int(nz(se15_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 3, f_tfCoord(se15_inv, _ext15), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 3, f_tfRel(l1_dir, l2_dir), text_color = l1_dir == l2_dir ? #34d399 : #fb7185, text_size = size.small)
+    table.cell(mtfT, 0, 4, _wl3 + " (chart)", text_color = l0_dir == 1 ? #34d399 : l0_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 4, f_dirArrow(l0_dir) + " " + f_famS(int(nz(se5_ph))), text_color = #e2e8f0, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 4, f_tfCoord(se5_inv, _ext5), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 4, f_tfRel(l0_dir, l1_dir), text_color = l0_dir == l1_dir ? #34d399 : #fb7185, text_size = size.small)
+    table.cell(mtfT, 0, 5, _wl2, text_color = l3_dir == 1 ? #34d399 : l3_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 5, f_dirArrow(l3_dir) + " " + f_famS(int(nz(se3_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 5, f_tfCoord(se3_inv, _ext3), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 5, f_tfRel(l3_dir, l0_dir), text_color = l3_dir == l0_dir ? #34d399 : #fb7185, text_size = size.small)
+    table.cell(mtfT, 0, 6, _wl1 + " (child)", text_color = m1_dir == 1 ? #34d399 : m1_dir == -1 ? #fb7185 : #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 6, f_dirArrow(m1_dir) + " " + f_famS(int(nz(se1_ph))), text_color = #cbd5e1, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 6, f_tfCoord(se1_inv, _ext1), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 3, 6, f_tfRel(m1_dir, l3_dir), text_color = m1_dir == l3_dir ? #34d399 : #fb7185, text_size = size.small)
+    table.cell(mtfT, 0, 7, "Cross-TF story", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 7, mtfStory, text_color = mtfAlignN >= 4 ? #34d399 : mtfAlignN <= 2 ? #fb7185 : #fbbf24, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 7, "aligned " + str.tostring(mtfAlignN) + "/6", text_color = #e2e8f0, text_size = size.small)
+    table.cell(mtfT, 0, 8, "Ownership", text_color = #5fd0ff, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 1, 8, _ownStateTx, text_color = _ownStateCol, text_size = size.small, text_halign = text.align_left)
+    table.cell(mtfT, 2, 8, "owns: " + mtfOwnerL, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // F72 — CURVE TREE readout (own islast block) — the event-generated recursion
 // ══════════════════════════════════════════════════════════════════════════════
 if barstate.islast and showCurve
-    // curve tree writes into the shared topT table, columns 4-5
+    if na(treeT)
+        treeT := table.new(position.top_right, 2, 16, bgcolor = color.new(#0a0e27, 4), frame_color = color.new(#22d3ee, 30), frame_width = 1, border_width = 1)
+    // curve tree writes into its own treeT table at top_right (cols 0-1)
     string _odTx = _ownDirT == 1 ? "▲ BULL" : _ownDirT == -1 ? "▼ BEAR" : "○ —"
     string _ownLoc = (na(_ownOrig) or na(_ownExt)) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " → " + str.tostring(math.round_to_mintick(_ownExt)) + " → " + str.tostring(math.round_to_mintick(close))
     float  _retrFromX = (na(_ownOrig) or na(_ownExt) or _ownExt == _ownOrig) ? na : math.abs(_ownExt - close) / math.abs(_ownExt - _ownOrig) * 100.0
@@ -2458,55 +2486,55 @@ if barstate.islast and showCurve
     int    _tradeDir = (_ownDirT == 0 or (_life > 32.0 and _life < 45.0)) ? 0 : _life <= 32.0 ? -_ownDirT : _ownDirT
     string _tradeTx  = _tradeDir != 0 ? (_tradeDir == 1 ? "▲ LONG" : "▼ SHORT") + (_tradeDir != _ownDirT ? "  flip" : "  with curve") : _ownDirT == 0 ? "○ NO CURVE — WAIT" : "○ WAIT / MANAGE · owner " + _odTx
     color  _tradeCol = _tradeDir == 1 ? #34d399 : _tradeDir == -1 ? #fb7185 : #fbbf24
-    table.cell(topT, 4, 0, "◤ CURVE TREE ▌ " + _ctxLbl + " root · recursion " + _liveDot, text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 5, 0, "▶ " + _tradeTx, text_color = _tradeCol, text_size = size.normal, bgcolor = color.new(#0c4a6e, 12))
-    table.cell(topT, 4, 1, "Recursion depth / budget", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 1, str.tostring(_treeDepth) + " / " + str.tostring(_curveBudgetDepth) + (gCurve.compress >= 75 ? "  (failure swing)" : gCurve.compress >= 50 ? "  (compressed)" : gCurve.compress >= 25 ? "  (medium)" : "  (wide)"), text_color = #c4b5fd, text_size = size.small)
-    table.cell(topT, 4, 2, "Live curve nodes", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 2, str.tostring(_treeAlive), text_color = #e2e8f0, text_size = size.small)
-    table.cell(topT, 4, 3, "Owner energy (dominant)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 3, f_gauge(_ownNrgT) + " " + str.tostring(math.round(_ownNrgT)), text_color = _ownNrgT > 50 ? #34d399 : #fbbf24, text_size = size.small)
+    table.cell(treeT, 0, 0, "◤ CURVE TREE ▌ " + _ctxLbl + " root · recursion " + _liveDot, text_color = #d7faff, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(treeT, 1, 0, "▶ " + _tradeTx, text_color = _tradeCol, text_size = size.normal, bgcolor = color.new(#0c4a6e, 12))
+    table.cell(treeT, 0, 1, "Recursion depth / budget", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 1, str.tostring(_treeDepth) + " / " + str.tostring(_curveBudgetDepth) + (gCurve.compress >= 75 ? "  (failure swing)" : gCurve.compress >= 50 ? "  (compressed)" : gCurve.compress >= 25 ? "  (medium)" : "  (wide)"), text_color = #c4b5fd, text_size = size.small)
+    table.cell(treeT, 0, 2, "Live curve nodes", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 2, str.tostring(_treeAlive), text_color = #e2e8f0, text_size = size.small)
+    table.cell(treeT, 0, 3, "Owner energy (dominant)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 3, f_gauge(_ownNrgT) + " " + str.tostring(math.round(_ownNrgT)), text_color = _ownNrgT > 50 ? #34d399 : #fbbf24, text_size = size.small)
     // ── WHERE the owning curve lives — origin (birth) → current extreme price ──
-    table.cell(topT, 4, 4, "Curve  origin → extreme → now", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 4, _ownLoc + (na(_retrFromX) ? "" : "   ↩ " + str.tostring(math.round(_retrFromX)) + "% off X"), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 4, "Curve  origin → extreme → now", text_color = #fbbf24, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 4, _ownLoc + (na(_retrFromX) ? "" : "   ↩ " + str.tostring(math.round(_retrFromX)) + "% off X"), text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
     // ── PHASE SOURCE FLIPPED — the emergent NODE state is now the authority (the
     //    label the curve drives); the legacy machine phase is shown only as a cross-ref.
-    table.cell(topT, 4, 5, "● PHASE (LIVE · node)", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 5, "● PHASE (LIVE · node)", text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
     // ── F72 Principle 10 — compression persistence: can the counter side build? ──
-    table.cell(topT, 5, 5, _ownState, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 4, 7, "Force (compression persist)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 7, _cpState + "  " + str.tostring(math.round(_cpForce)) + "  " + _cpTrend, text_color = _cpState == "PERSISTING" ? #34d399 : _cpState == "LEAKING" ? #fb7185 : #fbbf24, text_size = size.small)
-    table.cell(topT, 4, 8, _cpState == "LEAKING" ? "Defends (origin in play)" : "Ownership migrated → defends", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 8, _cpState == "LEAKING" ? (na(_ownOrig) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " origin") : (na(_mig50) ? "—" : str.tostring(math.round_to_mintick(_mig618)) + "–" + str.tostring(math.round_to_mintick(_mig50)) + "  (0.618–0.5)"), text_color = _cpState == "LEAKING" ? #fda4af : #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 5, _ownState, text_color = #5eead4, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 7, "Force (compression persist)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 7, _cpState + "  " + str.tostring(math.round(_cpForce)) + "  " + _cpTrend, text_color = _cpState == "PERSISTING" ? #34d399 : _cpState == "LEAKING" ? #fb7185 : #fbbf24, text_size = size.small)
+    table.cell(treeT, 0, 8, _cpState == "LEAKING" ? "Defends (origin in play)" : "Ownership migrated → defends", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 8, _cpState == "LEAKING" ? (na(_ownOrig) ? "—" : str.tostring(math.round_to_mintick(_ownOrig)) + " origin") : (na(_mig50) ? "—" : str.tostring(math.round_to_mintick(_mig618)) + "–" + str.tostring(math.round_to_mintick(_mig50)) + "  (0.618–0.5)"), text_color = _cpState == "LEAKING" ? #fda4af : #5eead4, text_size = size.small, text_halign = text.align_left)
     // ── THE judgement: is the campaign still alive? hold vs abandon (flip) ──
-    table.cell(topT, 4, 9, "TRADE ALIVE?  life " + str.tostring(math.round(_life)), text_color = #0a0e27, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_aliveCol, 25))
-    table.cell(topT, 5, 9, _aliveTx, text_color = #0a0e27, text_size = size.normal, bgcolor = color.new(_aliveCol, 25))
+    table.cell(treeT, 0, 9, "TRADE ALIVE?  life " + str.tostring(math.round(_life)), text_color = #0a0e27, text_size = size.normal, text_halign = text.align_left, bgcolor = color.new(_aliveCol, 25))
+    table.cell(treeT, 1, 9, _aliveTx, text_color = #0a0e27, text_size = size.normal, bgcolor = color.new(_aliveCol, 25))
     // ── Narrative LINEAGE — is the sequence of entry curves converging or diverging? ──
     string _seqTx = ""
     if array.size(_seqRetr) > 0
         for _si = 0 to array.size(_seqRetr) - 1
             _seqTx := _seqTx + str.tostring(math.round(array.get(_seqRetr, _si))) + (_si < array.size(_seqRetr) - 1 ? " → " : "")
     color _narrCol = _narrState == "STRENGTHENING" ? #34d399 : _narrState == "WEAKENING" ? #fb7185 : #fbbf24
-    table.cell(topT, 4, 10, "Narrative (lineage)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 10, _narrState + "  " + str.tostring(math.round(_narrative)) + "  (S" + str.tostring(_supVotes) + "/D" + str.tostring(_degVotes) + ")", text_color = _narrCol, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 4, 11, "Retrace sequence (% leg)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 11, _seqTx == "" ? "forming…" : _seqTx, text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 4, 12, "Chain · last vote", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 12, (array.size(_seqRetr) < 2 ? "forming" : (_converging ? "CONVERGING (story builds)" : "DIVERGING (story fades)")) + " · " + _lastVote, text_color = array.size(_seqRetr) < 2 ? #94a3b8 : (_converging ? #34d399 : #fb7185), text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 10, "Narrative (lineage)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 10, _narrState + "  " + str.tostring(math.round(_narrative)) + "  (S" + str.tostring(_supVotes) + "/D" + str.tostring(_degVotes) + ")", text_color = _narrCol, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 11, "Retrace sequence (% leg)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 11, _seqTx == "" ? "forming…" : _seqTx, text_color = #fde68a, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 12, "Chain · last vote", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 12, (array.size(_seqRetr) < 2 ? "forming" : (_converging ? "CONVERGING (story builds)" : "DIVERGING (story fades)")) + " · " + _lastVote, text_color = array.size(_seqRetr) < 2 ? #94a3b8 : (_converging ? #34d399 : #fb7185), text_size = size.small, text_halign = text.align_left)
     // ── second score: is life decaying across successive curves? (scope of danger) ──
-    table.cell(topT, 4, 13, "Chain vitality · scope", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 13, str.tostring(math.round(_chainVitality)) + " ch / " + str.tostring(math.round(_wholeChainLife)) + " whole · " + _chainScope, text_color = _chainCol, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 13, "Chain vitality · scope", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 13, str.tostring(math.round(_chainVitality)) + " ch / " + str.tostring(math.round(_wholeChainLife)) + " whole · " + _chainScope, text_color = _chainCol, text_size = size.small, text_halign = text.align_left)
     // ── separate IMMEDIATE viability from the looming PARENT (HTF) threat ──
-    table.cell(topT, 4, 14, "→ " + _wl6 + " parent threat", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 14, _htfThreat + (na(_htfRoomAtr) ? "" : " · " + str.tostring(math.round(_htfRoomAtr * 10) / 10) + " ATR") + (na(_parentThreat) ? "" : " · " + str.tostring(math.round_to_mintick(_parentThreat))), text_color = na(_htfRoomAtr) ? #94a3b8 : _htfRoomAtr > 3.0 ? #34d399 : _htfRoomAtr > 1.0 ? #fbbf24 : #fb7185, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 14, "→ " + _wl6 + " parent threat", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 14, _htfThreat + (na(_htfRoomAtr) ? "" : " · " + str.tostring(math.round(_htfRoomAtr * 10) / 10) + " ATR") + (na(_parentThreat) ? "" : " · " + str.tostring(math.round_to_mintick(_parentThreat))), text_color = na(_htfRoomAtr) ? #94a3b8 : _htfRoomAtr > 3.0 ? #34d399 : _htfRoomAtr > 1.0 ? #fbbf24 : #fb7185, text_size = size.small, text_halign = text.align_left)
     // ── PER-TF CURVE SEQUENCE — the history of curves born on this TF (C1→C2→C3…),
     //    each one an owner-direction flip; shows how the timeframe keeps recurring. ──
     string _cseqTx = ""
     if array.size(_cseq) > 0
         for _ci = 0 to array.size(_cseq) - 1
             _cseqTx := _cseqTx + "C" + str.tostring(_ci + 1) + (array.get(_cseq, _ci) == 1 ? "▲" : "▼") + (_ci < array.size(_cseq) - 1 ? " → " : "")
-    table.cell(topT, 4, 15, "Curve sequence (this TF)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
-    table.cell(topT, 5, 15, _cseqTx == "" ? "forming…" : _cseqTx, text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 0, 15, "Curve sequence (this TF)", text_color = #94a3b8, text_size = size.small, text_halign = text.align_left)
+    table.cell(treeT, 1, 15, _cseqTx == "" ? "forming…" : _cseqTx, text_color = #c4b5fd, text_size = size.small, text_halign = text.align_left)
 
 // ── F72 — plot the CURVE TREE on the chart: each live curve as origin→extreme,
 //    coloured by direction, dashed when recursive (depth>0), tagged with its
@@ -2602,6 +2630,27 @@ if barstate.islast and showTree
         float _budAtr = math.abs(_budTgt - close) / math.max(atr, 1e-10)
         string _budTx = "▶ BUDGET TGT · " + _budSrc + "  " + str.tostring(math.round_to_mintick(_budTgt)) + "   " + str.tostring(_treeDepth) + "/" + str.tostring(_curveBudgetDepth) + " · " + str.tostring(math.round(_budAtr * 10) / 10) + " ATR"
         array.push(tree_lbls, label.new(_budX + _lnB * 9, _budTgt, _budTx, style = label.style_label_left, color = color.new(_budCol, 8), textcolor = #0a0e27, size = size.normal))
+
+// ── FLIP ZONE on chart — the chart wave's order-block / flip zone (flipTop..flipBot),
+//    extended right and clearly marked, coloured by wave direction. This is the
+//    structural pivot the curve owns and defends. ─────────────────────────────
+var box   flipBox = na
+var label flipLbl = na
+if showFlipFU and barstate.islast and not na(flipTop) and not na(flipBot)
+    float _fzM = (flipTop + flipBot) / 2.0
+    int   _fzL = bar_index - 60
+    int   _fzR = bar_index + 12
+    color _fzC = direction == 1 ? #34d399 : direction == -1 ? #fb7185 : #c084fc
+    if na(flipBox)
+        flipBox := box.new(_fzL, flipTop, _fzR, flipBot, border_color = color.new(_fzC, 25), border_width = 2, bgcolor = color.new(_fzC, 84))
+        flipLbl := label.new(_fzR, _fzM, "FLIP ZONE", style = label.style_label_left, color = color.new(_fzC, 18), textcolor = #0a0e27, size = size.small)
+    else
+        box.set_lefttop(flipBox, _fzL, flipTop)
+        box.set_rightbottom(flipBox, _fzR, flipBot)
+        box.set_border_color(flipBox, color.new(_fzC, 25))
+        box.set_bgcolor(flipBox, color.new(_fzC, 84))
+        label.set_xy(flipLbl, _fzR, _fzM)
+        label.set_color(flipLbl, color.new(_fzC, 18))
 
 // ── Alerts (global scope) ─────────────────────────────────────────────────────
 alertcondition(gAction == "ATTACK" and gMaster == 1,  "Senseei ATTACK Long",  "Master Senseei: ATTACK long")
