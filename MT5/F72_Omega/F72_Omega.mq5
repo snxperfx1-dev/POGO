@@ -5203,34 +5203,21 @@ public:
 
    void Update(OmegaCurve &curve)
      {
-      CurveState *chart = curve.ChartTfState();
-      waveDir       = (chart != NULL) ? chart.dir : 0;
-      waveProgress  = (chart != NULL) ? chart.waveProgress : 0.0;
-
-      // stack direction from the 6-TF ladder (M1/M3/M5/M15/H1/H4).
-      // Each TF contributes +1/-1 by its own dir; stackDir is sign of sum.
-      int sum = curve.tfM1.dir + curve.tfM3.dir + curve.tfM5.dir +
-                 curve.tfM15.dir + curve.tfH1.dir + curve.tfH4.dir;
-      stackDir = sum > 0 ? 1 : sum < 0 ? -1 : 0;
-
-      // Stack agreement: count of TFs sharing stackDir / 6 → 0..100.
-      int sameDir = 0;
-      if(curve.tfM1.dir  == stackDir && stackDir != 0) sameDir++;
-      if(curve.tfM3.dir  == stackDir && stackDir != 0) sameDir++;
-      if(curve.tfM5.dir  == stackDir && stackDir != 0) sameDir++;
-      if(curve.tfM15.dir == stackDir && stackDir != 0) sameDir++;
-      if(curve.tfH1.dir  == stackDir && stackDir != 0) sameDir++;
-      if(curve.tfH4.dir  == stackDir && stackDir != 0) sameDir++;
-      stackPct = sameDir / 6.0 * 100.0;
-      fractalStackDir   = stackDir;
-      fractalStackScore = stackPct;
-
-      // Per-TF "aligned with stack" markers for Senseei consumption.
-      alignedM1  = (curve.tfM1.dir  == stackDir && stackDir != 0) ? 1 : 0;
-      alignedM5  = (curve.tfM5.dir  == stackDir && stackDir != 0) ? 1 : 0;
-      alignedM15 = (curve.tfM15.dir == stackDir && stackDir != 0) ? 1 : 0;
-      alignedH1  = (curve.tfH1.dir  == stackDir && stackDir != 0) ? 1 : 0;
-      alignedH4  = (curve.tfH4.dir  == stackDir && stackDir != 0) ? 1 : 0;
+      // HyperOmega adapter (OMEGA-F72 §6): consume the AUTHENTIC F60 fractal
+      // stack / wave from the substrate instead of recomputing from OMEGA's
+      // curve states. OMEGA's proxy stack math is removed.
+      waveDir           = f60_waveDir;
+      waveProgress      = f60_waveProgress;
+      stackDir          = f60_fractalStackDir;
+      stackPct          = f60_fractalStackScore;
+      fractalStackDir   = f60_fractalStackDir;
+      fractalStackScore = f60_fractalStackScore;
+      int sd = f60_fractalStackDir;
+      alignedM1  = (m1_dir == sd && sd != 0) ? 1 : 0;
+      alignedM5  = (l0_dir == sd && sd != 0) ? 1 : 0;
+      alignedM15 = (l1_dir == sd && sd != 0) ? 1 : 0;
+      alignedH1  = (l2_dir == sd && sd != 0) ? 1 : 0;
+      alignedH4  = (l4_dir == sd && sd != 0) ? 1 : 0;
      }
 
    string Snapshot() const
@@ -7220,37 +7207,16 @@ public:
 
    void Update(OmegaCurve &curve, double life)
      {
-      int oi = curve.tree.ownerIndex;
-      // residual = energy remaining in the owner curve
-      residualEnergyScore = (oi >= 0 && curve.tree.tree[oi].alive)
-                              ? curve.tree.tree[oi].energy : 0.0;
-      // dissipated = energy lost vs peak
-      double peak = (oi >= 0) ? curve.tree.tree[oi].forcePeak : 0.0;
-      dissipatedEnergy = MathMax(0.0, peak - residualEnergyScore);
-      expansionEnergy  = MathMax(0.0, residualEnergyScore - 50.0);
-
-      // resolution: tied to life decay
-      if(life >= 60.0)        { resCode = 0; resolutionState = "UNRESOLVED"; }
-      else if(life >= 32.0)   { resCode = 1; resolutionState = "PARTIALLY RESOLVED"; }
-      else                     { resCode = 2; resolutionState = "RESOLVED"; }
-
-      // primary attractor: where the curve is heading (its extreme),
-      // weighted by residual energy + distance from current price.
-      primaryAttractorPrice = (oi >= 0) ? curve.tree.tree[oi].extreme : 0.0;
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-      double atrApprox = 0.0;
-      // ATR proxy from chart-TF
-      CurveState *chart = curve.ChartTfState();
-      if(chart != NULL) atrApprox = chart.physics.atr;
-      if(atrApprox <= 0 && bid > 0) atrApprox = bid * 0.001;
-
-      double distAtr = (primaryAttractorPrice > 0 && bid > 0 && atrApprox > 0)
-                        ? MathAbs(bid - primaryAttractorPrice) / atrApprox : 100.0;
-      primaryAttractorScore = MathMax(0.0, MathMin(100.0,
-         residualEnergyScore * 0.40
-         + (resCode == 0 ? 30.0 : resCode == 1 ? 20.0 : 5.0)
-         + MathMax(0.0, 30.0 - distAtr * 5.0)));
+      // HyperOmega adapter (§6): consume the AUTHENTIC F60 ERF (EDE/RE/EAE)
+      // from the substrate. OMEGA's life-decay/tree-energy proxy is removed.
+      residualEnergyScore   = re_residualEnergyScore;
+      dissipatedEnergy      = ede_dissipatedEnergy;
+      expansionEnergy       = ede_expansionEnergy;
+      resolutionState       = re_resolutionState;
+      resCode               = (re_resolutionState == "RESOLVED") ? 2
+                            : (re_resolutionState == "PARTIALLY RESOLVED") ? 1 : 0;
+      primaryAttractorPrice = eae_primaryAttractorPrice;
+      primaryAttractorScore = eae_primaryAttractorScore;
      }
 
    string Snapshot() const
@@ -7353,26 +7319,17 @@ public:
 
    void Update(OmegaCurve &curve, OmegaEngine1A &engine1A)
      {
-      // active when family is Liquidation
-      active = (engine1A.family == "Liquidation");
-      int oi = curve.tree.ownerIndex;
-      target = (oi >= 0) ? curve.tree.tree[oi].extreme : 0.0;
+      // HyperOmega adapter (§6, #4): consume the AUTHENTIC F60 liquidation
+      // overlay (Engine 1A.7) — real substates Initialization/Push/
+      // Displacement/Induction/Terminal Liquidation/Objective Arrival.
+      active     = f60_liqg_active;
+      target     = f60_liqg_target;
+      subPhase   = f60_liqg_subPhase;       // authentic F60 substate
+      distPct    = liqg_distPct;
+      objArrival = liqg_objArrival;
       double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      CurveState *chart = curve.ChartTfState();
-      double atr = (chart != NULL) ? chart.physics.atr : 0.0;
-      if(atr <= 0) atr = MathMax(bid * 0.001, 1e-10);
-      distAtr = (active && target > 0 && bid > 0)
-                 ? MathAbs(bid - target) / atr : 100.0;
-      // distPct against the owner curve leg
-      double origin = (oi >= 0) ? curve.tree.tree[oi].origin : 0.0;
-      distPct = (active && target > 0 && origin > 0 && target != origin)
-                 ? MathAbs(bid - target) / MathAbs(target - origin) * 100.0
-                 : 100.0;
-      objArrival = active && distAtr < 0.5;
-      subPhase = !active ? "" :
-                  objArrival ? "Arrived" :
-                  distAtr < 1.5 ? "Closing in" :
-                  distAtr < 4.0 ? "Approaching" : "Forming";
+      double atr = g_atr > 0 ? g_atr : MathMax(bid * 0.001, 1e-10);
+      distAtr    = (active && target > 0 && bid > 0) ? MathAbs(bid - target) / atr : 100.0;
      }
 
    string Snapshot() const
@@ -7707,29 +7664,13 @@ public:
       h4CompPct = CompletionPct(sym, PERIOD_H4,        4 * 3600);
       h1CompPct = CompletionPct(sym, PERIOD_H1,            3600);
 
-      // Alignment: count of cycles sharing dominant direction
-      int sum = mnDir + wDir + dDir + h4Dir + h1Dir;
-      int dom = sum > 0 ? 1 : sum < 0 ? -1 : 0;
-      int cast = (mnDir != 0 ? 1 : 0) + (wDir != 0 ? 1 : 0) + (dDir != 0 ? 1 : 0) +
-                  (h4Dir != 0 ? 1 : 0) + (h1Dir != 0 ? 1 : 0);
-      int forV = (mnDir == dom && mnDir != 0 ? 1 : 0) + (wDir == dom && wDir != 0 ? 1 : 0) +
-                  (dDir == dom && dDir != 0 ? 1 : 0) + (h4Dir == dom && h4Dir != 0 ? 1 : 0) +
-                  (h1Dir == dom && h1Dir != 0 ? 1 : 0);
-      timeAlign    = cast > 0 ? (double)forV / cast * 100.0 : 50.0;
-      timeConflict = cast > 0 ? (double)(cast - forV) / cast * 100.0 : 0.0;
-
-      // Sequence — earliest-developing cycle by completion %
-      double minComp = 999.0; int idx = 0;
-      if(mnCompPct < minComp) { minComp = mnCompPct; idx = 0; }
-      if(wCompPct  < minComp) { minComp = wCompPct;  idx = 1; }
-      if(dCompPct  < minComp) { minComp = dCompPct;  idx = 2; }
-      if(h4CompPct < minComp) { minComp = h4CompPct; idx = 3; }
-      if(h1CompPct < minComp) { minComp = h1CompPct; idx = 4; }
-      cycleSeqIdx = idx;
-      string names[];  ArrayResize(names, 5);
-      names[0] = "MN"; names[1] = "W"; names[2] = "D"; names[3] = "H4"; names[4] = "H1";
-      string phase = minComp < 25 ? "early" : minComp < 60 ? "developing" : "mature";
-      sequenceTag = names[idx] + " " + phase;
+      // HyperOmega adapter (§6, #10): the INTELLIGENCE outputs come from the
+      // AUTHENTIC F60 Time Intelligence engine (cycles + h1Timing + tSeq).
+      // OMEGA's own alignment/sequence proxy math is removed; the raw cycle
+      // O/H/L reads above are retained only for the cockpit display.
+      timeAlign    = f60_timeAlign;
+      timeConflict = f60_timeConflict;
+      sequenceTag  = tSeq;
      }
 
    string Snapshot() const
@@ -7784,61 +7725,15 @@ public:
                 const OmegaEngine1A &engine1A, OmegaCurve &curve,
                 double life, double waveProgress)
      {
-      string ph = engine1A.currentPhase;
-      bool isExpansion  = StringFind(ph, "Expansion") >= 0
-                          && StringFind(ph, "Pre-Convexity") < 0
-                          && StringFind(ph, "Induction") < 0;
-      bool isPreConv    = StringFind(ph, "Pre-Convexity") >= 0;
-      bool isInduction  = StringFind(ph, "Induction") >= 0 || StringFind(ph, "Liquidity") >= 0;
-      bool isAbsorption = StringFind(ph, "Absorption") >= 0;
-      bool isClimax     = StringFind(ph, "New High") >= 0 || StringFind(ph, "New Low") >= 0
-                          || StringFind(ph, "Climax") >= 0;
-      bool isOrigin     = StringFind(ph, "Point 4") >= 0;
-
-      // Continuation — the curve is alive, force persisting, story coherent
-      continuationBelief = 0.0;
-      if(life >= 60.0)                                continuationBelief += 30.0;
-      if(sn.alignment >= 65.0)                         continuationBelief += 20.0;
-      if(energy.resCode == 0)                          continuationBelief += 15.0;
-      if(isExpansion || isPreConv)                     continuationBelief += 15.0;
-      if(sn.opportunity == "STRONG" ||
-         sn.opportunity == "EXCEPTIONAL")              continuationBelief += 20.0;
-      continuationBelief = MathMax(0.0, MathMin(100.0, continuationBelief));
-
-      // Retracement — pullback risk; force leaking, life weakening, deep retrace
-      retracementBelief = 0.0;
-      if(life < 60.0 && life > 32.0)                  retracementBelief += 25.0;
-      if(energy.resCode == 1)                          retracementBelief += 20.0;
-      if(isInduction)                                  retracementBelief += 15.0;
-      if(sn.conflict > 40.0)                           retracementBelief += 15.0;
-      double resPct = energy.residualEnergyScore;
-      if(resPct < 50.0)                                retracementBelief += 15.0;
-      retracementBelief = MathMax(0.0, MathMin(100.0, retracementBelief));
-
-      // Expansion — fresh impulse / new range
-      expansionBelief = 0.0;
-      if(isExpansion)                                  expansionBelief += 30.0;
-      if(life >= 60.0 && energy.resCode == 0)          expansionBelief += 25.0;
-      if(waveProgress < 35.0)                          expansionBelief += 20.0;
-      if(sn.timing == "EARLY" || sn.timing == "VERY EARLY") expansionBelief += 15.0;
-      expansionBelief = MathMax(0.0, MathMin(100.0, expansionBelief));
-
-      // Creation — new high / new low forming
-      creationBelief = 0.0;
-      if(isClimax)                                     creationBelief += 35.0;
-      if(waveProgress >= 75.0 && waveProgress < 96.0)  creationBelief += 25.0;
-      if(life >= 60.0)                                 creationBelief += 15.0;
-      if(sn.timing == "LATE")                          creationBelief += 15.0;
-      creationBelief = MathMax(0.0, MathMin(100.0, creationBelief));
-
-      // Absorption — flat / two-sided / mature without expansion
-      absorptionBelief = 0.0;
-      if(isAbsorption)                                 absorptionBelief += 35.0;
-      if(life < 32.0)                                  absorptionBelief += 20.0;
-      if(sn.conflict > 60.0)                           absorptionBelief += 15.0;
-      if(waveProgress >= 96.0)                         absorptionBelief += 15.0;
-      if(energy.resCode == 2)                          absorptionBelief += 15.0;
-      absorptionBelief = MathMax(0.0, MathMin(100.0, absorptionBelief));
+      // HyperOmega adapter (§6): consume the AUTHENTIC F60 belief cloud
+      // (6 EMA-smoothed beliefs) from the substrate. OMEGA's phase-string
+      // heuristic belief math is removed. F60 convexity≈continuation;
+      // demandReturn folds into continuation.
+      continuationBelief = MathMax(convexityBelief, demandReturnBelief);
+      retracementBelief  = f60_retracementBelief;
+      expansionBelief    = f60_expansionBelief;
+      creationBelief     = f60_creationBelief;
+      absorptionBelief   = f60_absorptionBelief;
 
       // Dominant
       double mx = continuationBelief; dominant = "Continuation";
@@ -8016,6 +7911,12 @@ public:
            }
         }
       liqHeat = total > 0 ? (double)near / total * 100.0 : 0.0;
+      // HyperOmega adapter (§6): override the consumed INTELLIGENCE outputs
+      // with the AUTHENTIC F60 liquidity engine (heatmap + sweep). The ring
+      // above is retained only to surface nearest resting levels for display.
+      liqHeat     = f60_liqHeat;
+      liqSweepOK  = f60_liqSweepOK;
+      liqSweepDir = liqSweepBull ? 1 : liqSweepBear ? -1 : 0;
      }
 
    string Snapshot() const
