@@ -120,7 +120,7 @@ enum ENUM_OMEGA_SESSION
   };
 
 //=== Constants =====================================================
-#define OMEGA_VERSION                "2.0.0-hyperomega"
+#define OMEGA_VERSION                "2.0.1-hyperomega-norisklimits"
 #define OMEGA_FILES_ROOT             "F72_Omega"
 #define OMEGA_LOG_DIR                "F72_Omega/logs"
 #define OMEGA_CAMPAIGN_DIR           "F72_Omega/campaigns"
@@ -1105,12 +1105,10 @@ public:
       double ddHard = OmegaMath::Pct(m_baselineEquity  - eq, m_baselineEquity);
 
       ENUM_OMEGA_CAPITAL_STATE prev = m_state;
-      if(ddHard >= m_hardLimitPct)            m_state = CAPITAL_SUSPENDED;
-      else if(ddWeek >= m_weeklyLossLimitPct) m_state = CAPITAL_RESTRICTED;
-      else if(ddDay  >= m_dailyLossLimitPct)  m_state = CAPITAL_RESTRICTED;
-      else if(ddDay  >= m_dailyLossLimitPct  * 0.66 ||
-              ddWeek >= m_weeklyLossLimitPct * 0.66) m_state = CAPITAL_WARNING;
-      else                                    m_state = CAPITAL_HEALTHY;
+      // Daily & weekly loss limits REMOVED per config — only the hard
+      // (baseline) drawdown limit may suspend trading.
+      if(ddHard >= m_hardLimitPct) m_state = CAPITAL_SUSPENDED;
+      else                          m_state = CAPITAL_HEALTHY;
 
       if(m_state != prev)
          OmegaLogger::LogWarning("CAPITAL",
@@ -1137,10 +1135,9 @@ public:
    //--- smoothly toward zero as drawdowns approach their limits.
    double Throttle() const
      {
-      double dt = OmegaMath::Clamp(1.0 - (DailyDrawdownPct()  / m_dailyLossLimitPct ), 0.0, 1.0);
-      double wt = OmegaMath::Clamp(1.0 - (WeeklyDrawdownPct() / m_weeklyLossLimitPct), 0.0, 1.0);
-      double ht = OmegaMath::Clamp(1.0 - (HardDrawdownPct()   / m_hardLimitPct      ), 0.0, 1.0);
-      return MathMin(dt, MathMin(wt, ht));
+      // Daily/weekly throttle REMOVED — only the hard drawdown throttles size.
+      double ht = OmegaMath::Clamp(1.0 - (HardDrawdownPct() / m_hardLimitPct), 0.0, 1.0);
+      return ht;
      }
   };
 
@@ -10672,32 +10669,15 @@ public:
       r.evWith     = (ownerDir != 0) ? ComputeEV(state, ownerDir,  ownerDir) : 1.0;
       r.evCounter  = (ownerDir != 0) ? ComputeEV(state, -ownerDir, ownerDir) : 1.0;
 
-      //=== FORCE-FALLBACK during warmup ============================
-      //   Perception not primed OR no curve owner → simple bar-bias
-      //   so the engine still trades during the first ~10 bars.
+      //=== WARMUP / NO OWNER → OBSERVE ONLY ========================
+      //   Auto bar-bias entries on chart-open REMOVED per config. The
+      //   engine no longer fires a "force-fallback" trade during warmup;
+      //   it waits for a real owner curve to take the wheel.
       if(!state.primed || ownerDir == 0)
         {
-         double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
-         double close5 = iClose(_Symbol, PERIOD_CURRENT, 5);
-         if(close1 > 0 && close5 > 0 && activeSameDirCount + activeCounterCount == 0)
-           {
-            int bias = (close1 > close5) ? 1 : (close1 < close5 ? -1 : 0);
-            if(bias != 0)
-              {
-               r.decision           = (bias == 1) ? OMEGA_DEC_ENTER_LONG : OMEGA_DEC_ENTER_SHORT;
-               r.suggestedDirection = bias;
-               r.suggestedRole      = POS_ORIGIN;
-               r.reason             = REASON_HEARTBEAT;
-               r.conviction         = 25.0;     // small conviction → small size
-               r.evWith             = 1.0;
-               r.detail             = StringFormat("force-fallback · primed=%s ownerDir=%d bias=%d",
-                                                   state.primed ? "Y" : "N", ownerDir, bias);
-               return r;
-              }
-           }
          r.decision = OMEGA_DEC_OBSERVE;
          r.reason   = state.primed ? REASON_OWNERSHIP_LEAKING : REASON_PHASE_NOT_BUILT;
-         r.detail   = "warmup · waiting for owner curve to take wheel";
+         r.detail   = "warmup · waiting for owner curve (auto-entry disabled)";
          return r;
         }
 
@@ -10926,17 +10906,8 @@ public:
                          dec == OMEGA_DEC_ENTER_SHORT ||
                          dec == OMEGA_DEC_ADD ||
                          dec == OMEGA_DEC_REVERSE);
-      if(cs == CAPITAL_RESTRICTED && isEntryDec)
-        {
-         g_entryStatus = "SKIP: CAPITAL RESTRICTED (daily/weekly DD halt)";
-         g_entryStatusTime = TimeCurrent();
-         g_entryAttempts++; g_entrySkips++;
-         OmegaLogger::LogDecision(symbol, m_trade.Mode(), OMEGA_DEC_OBSERVE,
-                                   REASON_DAILY_LIMIT,
-                                   state.life, state.stability, state.confidence,
-                                   "Capital RESTRICTED — entry suppressed (managing only)");
-         return;
-        }
+      // Daily/weekly RESTRICTED entry-halt REMOVED per config. Only the hard
+      // drawdown limit (CAPITAL_SUSPENDED, handled above) can stop entries.
 
       if(m_positions == NULL)
         {
